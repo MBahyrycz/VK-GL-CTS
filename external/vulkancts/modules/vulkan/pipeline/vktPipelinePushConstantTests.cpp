@@ -85,6 +85,8 @@ enum RangeSizeCase
     SIZE_CASE_128,
     SIZE_CASE_256,
     SIZE_CASE_MAX,
+    SIZE_CASE_128_LONGVEC,
+    SIZE_CASE_256_LONGVEC,
     SIZE_CASE_UNSUPPORTED
 };
 
@@ -124,6 +126,7 @@ struct PushConstantData
         VkShaderStageFlags shaderStage;
         uint32_t offset;
         uint32_t size;
+        bool longVec;
     } range;
     struct PushConstantUpdate
     {
@@ -241,7 +244,7 @@ public:
                                      const bool multipleUpdate, const IndexType indexType, const bool pushConstant2,
                                      const PushConstantUseStage pcUsedStage = PC_USE_STAGE_ALL,
                                      const bool sizeQueriedFromDevice       = false);
-    virtual ~PushConstantGraphicsTestInstance(void);
+    virtual ~PushConstantGraphicsTestInstance(void) = default;
     void init(void);
     virtual tcu::TestStatus iterate(void);
     virtual std::vector<VkPushConstantRange> getPushConstantRanges(void)                         = 0;
@@ -513,16 +516,10 @@ void PushConstantGraphicsTestInstance::init(void)
             }
         }
 
-        VkPhysicalDeviceFeatures features = m_context.getDeviceFeatures();
-
         createShaderModule(vk, vkDevice, m_context.getBinaryCollection(), "color_vert", &m_vertexShaderModule);
         if (m_shaderFlags & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT ||
             m_shaderFlags & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT)
         {
-            if (features.tessellationShader == VK_FALSE)
-            {
-                TCU_THROW(NotSupportedError, "Tessellation Not Supported");
-            }
             createShaderModule(vk, vkDevice, m_context.getBinaryCollection(), "color_tesc", &m_tessControlShaderModule);
             createShaderModule(vk, vkDevice, m_context.getBinaryCollection(), "color_tese",
                                &m_tessEvaluationShaderModule);
@@ -530,10 +527,6 @@ void PushConstantGraphicsTestInstance::init(void)
         }
         if (m_shaderFlags & VK_SHADER_STAGE_GEOMETRY_BIT)
         {
-            if (features.geometryShader == VK_FALSE)
-            {
-                TCU_THROW(NotSupportedError, "Geometry Not Supported");
-            }
             createShaderModule(vk, vkDevice, m_context.getBinaryCollection(), "color_geom", &m_geometryShaderModule);
             useGeometry = true;
         }
@@ -680,10 +673,6 @@ void PushConstantGraphicsTestInstance::init(void)
         m_renderPass.end(vk, *m_cmdBuffer);
         endCommandBuffer(vk, *m_cmdBuffer);
     }
-}
-
-PushConstantGraphicsTestInstance::~PushConstantGraphicsTestInstance(void)
-{
 }
 
 tcu::TestStatus PushConstantGraphicsTestInstance::iterate(void)
@@ -1126,7 +1115,7 @@ public:
     virtual void checkSupport(Context &context) const;
     virtual void initPrograms(SourceCollections &sourceCollections) const = 0;
     virtual TestInstance *createInstance(Context &context) const          = 0;
-    RangeSizeCase getRangeSizeCase(uint32_t rangeSize) const;
+    RangeSizeCase getRangeSizeCase(uint32_t rangeSize, bool longVec) const;
 
 protected:
     const PipelineConstructionType m_pipelineConstructionType;
@@ -1176,17 +1165,41 @@ void PushConstantGraphicsTest::checkSupport(Context &context) const
     {
         for (size_t rangeNdx = 0; rangeNdx < m_rangeCount; rangeNdx++)
         {
-            if (m_pushConstantRange[rangeNdx].range.size > limits.maxPushConstantsSize)
+            const auto &range = m_pushConstantRange[rangeNdx].range;
+            if (range.size > limits.maxPushConstantsSize)
             {
-                TCU_THROW(NotSupportedError,
-                          "PushConstant size " + std::to_string(m_pushConstantRange[rangeNdx].range.size) +
-                              " exceeds device limit " + std::to_string(limits.maxPushConstantsSize));
+                TCU_THROW(NotSupportedError, "PushConstant size " + std::to_string(range.size) +
+                                                 " exceeds device limit " +
+                                                 std::to_string(limits.maxPushConstantsSize));
             }
+#ifndef CTS_USES_VULKANSC
+            if (m_pushConstantRange[rangeNdx].range.longVec && !context.getShaderLongVectorFeaturesEXT().longVector)
+            {
+                TCU_THROW(NotSupportedError, "longVector not supported");
+            }
+#endif
         }
     }
+
+    bool requiresTessellation = false;
+    bool requiresGeometry     = false;
+    for (size_t rangeNdx = 0; rangeNdx < m_rangeCount; rangeNdx++)
+    {
+        auto shaderStage = m_pushConstantRange[rangeNdx].range.shaderStage;
+        if (shaderStage & VK_SHADER_STAGE_GEOMETRY_BIT)
+            requiresGeometry = true;
+        if (shaderStage & (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT))
+            requiresTessellation = true;
+    }
+
+    const auto &features = context.getDeviceFeatures();
+    if (requiresTessellation && !features.tessellationShader)
+        TCU_THROW(NotSupportedError, "Tessellation Not Supported");
+    if (requiresGeometry && !features.geometryShader)
+        TCU_THROW(NotSupportedError, "Geometry Not Supported");
 }
 
-RangeSizeCase PushConstantGraphicsTest::getRangeSizeCase(uint32_t rangeSize) const
+RangeSizeCase PushConstantGraphicsTest::getRangeSizeCase(uint32_t rangeSize, bool longVec) const
 {
     if (m_sizeQueriedFromDevice)
     {
@@ -1210,9 +1223,9 @@ RangeSizeCase PushConstantGraphicsTest::getRangeSizeCase(uint32_t rangeSize) con
     case 48:
         return SIZE_CASE_48;
     case 128:
-        return SIZE_CASE_128;
+        return longVec ? SIZE_CASE_128_LONGVEC : SIZE_CASE_128;
     case 256:
-        return SIZE_CASE_256;
+        return longVec ? SIZE_CASE_256_LONGVEC : SIZE_CASE_256;
     default:
         DE_FATAL("Range size unsupported yet");
         return SIZE_CASE_UNSUPPORTED;
@@ -1261,6 +1274,7 @@ void PushConstantGraphicsDisjointTest::initPrograms(SourceCollections &sourceCol
         if (m_pushConstantRange[rangeNdx].range.shaderStage & VK_SHADER_STAGE_VERTEX_BIT)
         {
             vertexSrc << "#version 450\n"
+                      << "#extension GL_EXT_long_vector : enable\n"
                       << "layout(location = 0) in highp vec4 position;\n"
                       << "layout(location = 1) in highp vec4 color;\n"
                       << "layout(location = 0) out highp vec4 vtxColor;\n"
@@ -1278,7 +1292,8 @@ void PushConstantGraphicsDisjointTest::initPrograms(SourceCollections &sourceCol
                 switch (m_indexType)
                 {
                 case INDEX_TYPE_CONST_LITERAL:
-                    switch (getRangeSizeCase(m_pushConstantRange[rangeNdx].range.size))
+                    switch (getRangeSizeCase(m_pushConstantRange[rangeNdx].range.size,
+                                             m_pushConstantRange[rangeNdx].range.longVec))
                     {
                     case SIZE_CASE_4:
                         vertexSrc << "int kind;\n"
@@ -1305,8 +1320,16 @@ void PushConstantGraphicsDisjointTest::initPrograms(SourceCollections &sourceCol
                         vertexSrc << "vec4 color[8];\n"
                                   << "} matInst;\n";
                         break;
+                    case SIZE_CASE_128_LONGVEC:
+                        vertexSrc << "vector<float, 32> color;\n"
+                                  << "} matInst;\n";
+                        break;
                     case SIZE_CASE_256:
                         vertexSrc << "vec4 color[16];\n"
+                                  << "} matInst;\n";
+                        break;
+                    case SIZE_CASE_256_LONGVEC:
+                        vertexSrc << "vector<float, 64> color;\n"
                                   << "} matInst;\n";
                         break;
                     case SIZE_CASE_MAX:
@@ -1340,7 +1363,8 @@ void PushConstantGraphicsDisjointTest::initPrograms(SourceCollections &sourceCol
                 switch (m_indexType)
                 {
                 case INDEX_TYPE_CONST_LITERAL:
-                    switch (getRangeSizeCase(m_pushConstantRange[rangeNdx].range.size))
+                    switch (getRangeSizeCase(m_pushConstantRange[rangeNdx].range.size,
+                                             m_pushConstantRange[rangeNdx].range.longVec))
                     {
                     case SIZE_CASE_4:
                         vertexSrc << "switch (matInst.kind) {\n"
@@ -1371,11 +1395,31 @@ void PushConstantGraphicsDisjointTest::initPrograms(SourceCollections &sourceCol
                                   << "vtxColor = color * 0.125;\n"
                                   << "}\n";
                         break;
+                    case SIZE_CASE_128_LONGVEC:
+                        vertexSrc << "vec4 color = vec4(0.0, 0, 0, 0.0);\n"
+                                  << "for (int i = 0; i < 8; i++)\n"
+                                  << "{\n"
+                                  << "  color = color + vec4(matInst.color[i*4], matInst.color[i*4+1], "
+                                     "matInst.color[i*4+2], matInst.color[i*4+3]);\n"
+                                  << "}\n"
+                                  << "vtxColor = color * 0.125;\n"
+                                  << "}\n";
+                        break;
                     case SIZE_CASE_256:
                         vertexSrc << "vec4 color = vec4(0.0, 0, 0, 0.0);\n"
                                   << "for (int i = 0; i < 16; i++)\n"
                                   << "{\n"
                                   << "  color = color + matInst.color[i];\n"
+                                  << "}\n"
+                                  << "vtxColor = color * 0.0625;\n"
+                                  << "}\n";
+                        break;
+                    case SIZE_CASE_256_LONGVEC:
+                        vertexSrc << "vec4 color = vec4(0.0, 0, 0, 0.0);\n"
+                                  << "for (int i = 0; i < 16; i++)\n"
+                                  << "{\n"
+                                  << "  color = color + vec4(matInst.color[i*4], matInst.color[i*4+1], "
+                                     "matInst.color[i*4+2], matInst.color[i*4+3]);\n"
                                   << "}\n"
                                   << "vtxColor = color * 0.0625;\n"
                                   << "}\n";
@@ -1696,7 +1740,8 @@ std::string PushConstantGraphicsOverlapTest::getPushConstantDeclarationStr(VkSha
     {
         if (m_pushConstantRange[rangeNdx].range.shaderStage & shaderStage)
         {
-            switch (getRangeSizeCase(m_pushConstantRange[rangeNdx].range.size))
+            switch (
+                getRangeSizeCase(m_pushConstantRange[rangeNdx].range.size, m_pushConstantRange[rangeNdx].range.longVec))
             {
             case SIZE_CASE_4:
                 src << "    layout(offset = " << m_pushConstantRange[rangeNdx].range.offset << ") float color;\n";
@@ -1720,6 +1765,14 @@ std::string PushConstantGraphicsOverlapTest::getPushConstantDeclarationStr(VkSha
                 break;
             case SIZE_CASE_128:
                 src << "    layout(offset = " << m_pushConstantRange[rangeNdx].range.offset << ") vec4 color[8];\n";
+                break;
+            case SIZE_CASE_128_LONGVEC:
+                src << "    layout(offset = " << m_pushConstantRange[rangeNdx].range.offset
+                    << ") vector<float, 32> color;\n";
+                break;
+            case SIZE_CASE_256_LONGVEC:
+                src << "    layout(offset = " << m_pushConstantRange[rangeNdx].range.offset
+                    << ") vector<float, 64> color;\n";
                 break;
             default:
                 DE_FATAL("Not implemented");
@@ -1771,6 +1824,7 @@ void PushConstantGraphicsOverlapTest::initPrograms(SourceCollections &sourceColl
         {
             const std::string source =
                 "#version 450\n"
+                "#extension GL_EXT_long_vector : enable\n"
                 "layout(location = 0) in highp vec4 position;\n"
                 "layout(location = 1) in highp vec4 inColor;\n"
                 "layout(location = 0) out highp vec4 vtxColor;\n"
@@ -1796,6 +1850,7 @@ void PushConstantGraphicsOverlapTest::initPrograms(SourceCollections &sourceColl
         if (m_pushConstantRange[rangeNdx].range.shaderStage & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT)
         {
             const std::string source = "#version 450\n"
+                                       "#extension GL_EXT_long_vector : enable\n"
                                        "layout (vertices = 3) out;\n" +
                                        ((m_pcUsedStage & PC_USE_STAGE_TESC) ?
                                             getPushConstantDeclarationStr(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) :
@@ -1831,6 +1886,7 @@ void PushConstantGraphicsOverlapTest::initPrograms(SourceCollections &sourceColl
         {
             const std::string source =
                 "#version 450\n"
+                "#extension GL_EXT_long_vector : enable\n"
                 "layout (triangles) in;\n" +
                 ((m_pcUsedStage & PC_USE_STAGE_TESE) ?
                      getPushConstantDeclarationStr(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) :
@@ -1862,6 +1918,7 @@ void PushConstantGraphicsOverlapTest::initPrograms(SourceCollections &sourceColl
         {
             const std::string source =
                 "#version 450\n"
+                "#extension GL_EXT_long_vector : enable\n"
                 "layout(triangles) in;\n"
                 "layout(triangle_strip, max_vertices=3) out;\n" +
                 ((m_pcUsedStage & PC_USE_STAGE_GEOM) ? getPushConstantDeclarationStr(VK_SHADER_STAGE_GEOMETRY_BIT) :
@@ -1899,6 +1956,7 @@ void PushConstantGraphicsOverlapTest::initPrograms(SourceCollections &sourceColl
         {
             const std::string source =
                 "#version 450\n"
+                "#extension GL_EXT_long_vector : enable\n"
                 "layout(location = 0) in highp vec4 vtxColor;\n"
                 "layout(location = 0) out highp vec4 fragColor;\n" +
                 ((m_pcUsedStage & PC_USE_STAGE_FRAG) ? getPushConstantDeclarationStr(VK_SHADER_STAGE_FRAGMENT_BIT) :
@@ -2423,7 +2481,17 @@ void PushConstantLifetimeTestInstance::init(void)
     }
 
     // Create render pass
-    m_renderPass = RenderPassWrapper(m_pipelineConstructionType, vk, vkDevice, m_colorFormat);
+    const auto attDesc = makeAttachmentDescription(
+        0u, m_colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
+        VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    const auto attRef      = makeAttachmentReference(0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    const auto subpassDesc = makeSubpassDescription(0u, VK_PIPELINE_BIND_POINT_GRAPHICS, 0u, nullptr, 1u, &attRef,
+                                                    nullptr, nullptr, 0u, nullptr);
+    const VkRenderPassCreateInfo rpCreateInfo{
+        VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, nullptr, 0u, 1u, &attDesc, 1u, &subpassDesc, 0u, nullptr,
+    };
+    m_renderPass = RenderPassWrapper(m_pipelineConstructionType, vk, vkDevice, &rpCreateInfo);
 
     // Create framebuffer
     {
@@ -2693,16 +2761,17 @@ tcu::TestStatus PushConstantLifetimeTestInstance::iterate(void)
 
         beginCommandBuffer(vk, *m_cmdBuffer, 0u);
 
+        bool inProperLayout = false;
         for (size_t ndx = 0; ndx < m_cmdList.size(); ndx++)
         {
-            const VkPushConstantRange pushConstantRange{m_pushConstantRange[m_cmdList[ndx].rangeNdx].range.shaderStage,
-                                                        m_pushConstantRange[m_cmdList[ndx].rangeNdx].range.offset,
-                                                        m_pushConstantRange[m_cmdList[ndx].rangeNdx].range.size};
-
             switch (m_cmdList[ndx].cType)
             {
             case CMD_PUSH_CONSTANT:
             {
+                const VkPushConstantRange pushConstantRange{
+                    m_pushConstantRange[m_cmdList[ndx].rangeNdx].range.shaderStage,
+                    m_pushConstantRange[m_cmdList[ndx].rangeNdx].range.offset,
+                    m_pushConstantRange[m_cmdList[ndx].rangeNdx].range.size};
                 vk.cmdPushConstants(*m_cmdBuffer, *m_pipelineLayout[m_cmdList[ndx].rangeNdx],
                                     pushConstantRange.stageFlags, pushConstantRange.offset, pushConstantRange.size,
                                     &value);
@@ -2727,12 +2796,20 @@ tcu::TestStatus PushConstantLifetimeTestInstance::iterate(void)
             {
                 const VkDeviceSize bufferOffset = 0;
 
+                const auto srcAccessMask =
+                    static_cast<VkAccessFlags>(inProperLayout ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0);
+                const auto oldLayout =
+                    (inProperLayout ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED);
+                const auto srcStage = static_cast<VkPipelineStageFlags>(
+                    inProperLayout ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+                const auto dstStage = static_cast<VkPipelineStageFlags>(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
                 const VkImageMemoryBarrier prePassBarrier = {
                     VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,     // VkStructureType sType;
                     nullptr,                                    // const void* pNext;
-                    0,                                          // VkAccessFlags srcAccessMask;
+                    srcAccessMask,                              // VkAccessFlags srcAccessMask;
                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,       // VkAccessFlags dstAccessMask;
-                    VK_IMAGE_LAYOUT_UNDEFINED,                  // VkImageLayout oldLayout;
+                    oldLayout,                                  // VkImageLayout oldLayout;
                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,   // VkImageLayout newLayout;
                     VK_QUEUE_FAMILY_IGNORED,                    // uint32_t srcQueueFamilyIndex;
                     VK_QUEUE_FAMILY_IGNORED,                    // uint32_t dstQueueFamilyIndex;
@@ -2740,9 +2817,9 @@ tcu::TestStatus PushConstantLifetimeTestInstance::iterate(void)
                     {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u} // VkImageSubresourceRange subresourceRange;
                 };
 
-                vk.cmdPipelineBarrier(*m_cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                                      &prePassBarrier);
+                vk.cmdPipelineBarrier(*m_cmdBuffer, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &prePassBarrier);
+
+                inProperLayout = true;
 
                 m_renderPass.begin(vk, *m_cmdBuffer, makeRect2D(0, 0, m_renderSize.x(), m_renderSize.y()),
                                    attachmentClearValue);
@@ -3288,25 +3365,47 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
         IndexType indexType;
     } graphicsParams[] = {
         // test range size is 4 bytes(minimum valid size)
-        {"range_size_4", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 4}, {0, 4}}}, false, INDEX_TYPE_CONST_LITERAL},
+        {"range_size_4", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 4, false}, {0, 4}}}, false, INDEX_TYPE_CONST_LITERAL},
         // test range size is 16 bytes, and together with a normal uniform
-        {"range_size_16", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}}}, false, INDEX_TYPE_CONST_LITERAL},
+        {"range_size_16", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}}}, false, INDEX_TYPE_CONST_LITERAL},
         // test range size is 128 bytes(maximum valid size in Vulkan 1.3)
-        {"range_size_128", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 128}, {0, 128}}}, false, INDEX_TYPE_CONST_LITERAL},
+        {"range_size_128",
+         1u,
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 128, false}, {0, 128}}},
+         false,
+         INDEX_TYPE_CONST_LITERAL},
         // test range size is 256 bytes(maximum valid size in Vulkan 1.4)
-        {"range_size_256", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 256}, {0, 256}}}, false, INDEX_TYPE_CONST_LITERAL},
+        {"range_size_256",
+         1u,
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 256, false}, {0, 256}}},
+         false,
+         INDEX_TYPE_CONST_LITERAL},
+#ifndef CTS_USES_VULKANSC
+        // test range size is 128 bytes(maximum valid size in Vulkan 1.3). Uses long vector type
+        {"range_size_128_longvec",
+         1u,
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 128, true}, {0, 128}}},
+         false,
+         INDEX_TYPE_CONST_LITERAL},
+        // test range size is 256 bytes(maximum valid size in Vulkan 1.4). Uses long vector type
+        {"range_size_256_longvec",
+         1u,
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 256, true}, {0, 256}}},
+         false,
+         INDEX_TYPE_CONST_LITERAL},
+#endif
         // test range size is max bytes queried from driver and will be overwritten
         {"range_size_max",
          1u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 0xFFFF}, {0, 0xFFFF}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 0xFFFF, false}, {0, 0xFFFF}}},
          false,
          INDEX_TYPE_CONST_LITERAL},
         // test range count, including all valid shader stage in graphics pipeline, and also multiple shader stages share one single range
         {"count_2_shaders_vert_frag",
          2u,
          {
-             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-             {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
+             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+             {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
          },
          false,
          INDEX_TYPE_CONST_LITERAL},
@@ -3314,9 +3413,9 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
         {"count_3_shaders_vert_geom_frag",
          3u,
          {
-             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-             {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
-             {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4}, {20, 4}},
+             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+             {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
+             {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4, false}, {20, 4}},
          },
          false,
          INDEX_TYPE_CONST_LITERAL},
@@ -3324,44 +3423,48 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
         {"count_5_shaders_vert_tess_geom_frag",
          5u,
          {
-             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-             {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
-             {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4}, {20, 4}},
-             {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 24, 4}, {24, 4}},
-             {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 32, 16}, {32, 16}},
+             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+             {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
+             {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4, false}, {20, 4}},
+             {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 24, 4, false}, {24, 4}},
+             {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 32, 16, false}, {32, 16}},
          },
          false,
          INDEX_TYPE_CONST_LITERAL},
         // test range count is 1, vertex and fragment shaders share one range
         {"count_1_shader_vert_frag",
          1u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4}, {0, 4}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, false}, {0, 4}}},
          false,
          INDEX_TYPE_CONST_LITERAL},
         // test data partial update and multiple times update
         {"data_update_partial_1",
          1u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {4, 24}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {4, 24}}},
          false,
          INDEX_TYPE_CONST_LITERAL},
         // test partial update of the values
         {"data_update_partial_2",
          1u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 48}, {32, 16}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 48, false}, {32, 16}}},
          false,
          INDEX_TYPE_CONST_LITERAL},
         // test multiple times update of the values
-        {"data_update_multiple", 1u, {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 4}, {0, 4}}}, true, INDEX_TYPE_CONST_LITERAL},
+        {"data_update_multiple",
+         1u,
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 4, false}, {0, 4}}},
+         true,
+         INDEX_TYPE_CONST_LITERAL},
         // dynamically uniform indexing of vertex, matrix, and array in vertex shader
         {"dynamic_index_vert",
          1u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 64}, {0, 64}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 64, false}, {0, 64}}},
          false,
          INDEX_TYPE_DYNAMICALLY_UNIFORM_EXPR},
         // dynamically uniform indexing of vertex, matrix, and array in fragment shader
         {"dynamic_index_frag",
          1u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64}, {0, 64}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64, false}, {0, 64}}},
          false,
          INDEX_TYPE_DYNAMICALLY_UNIFORM_EXPR}};
 
@@ -3375,30 +3478,30 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
         {"overlap_2_shaders_vert_frag",
          2u,
          {
-             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-             {{VK_SHADER_STAGE_FRAGMENT_BIT, 12, 36}, {12, 36}},
+             {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+             {{VK_SHADER_STAGE_FRAGMENT_BIT, 12, 36, false}, {12, 36}},
          }},
         // overlapping range count is 3, use vertex, geometry and fragment shaders
         {"overlap_3_shaders_vert_geom_frag",
          3u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 12, 36}, {12, 36}},
-          {{VK_SHADER_STAGE_GEOMETRY_BIT, 0, 32}, {16, 16}},
-          {{VK_SHADER_STAGE_FRAGMENT_BIT, 20, 4}, {20, 4}}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 12, 36, false}, {12, 36}},
+          {{VK_SHADER_STAGE_GEOMETRY_BIT, 0, 32, false}, {16, 16}},
+          {{VK_SHADER_STAGE_FRAGMENT_BIT, 20, 4, false}, {20, 4}}}},
         // overlapping range count is 4, use vertex, tessellation and fragment shaders
         {"overlap_4_shaders_vert_tess_frag",
          4u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 8, 4}, {8, 4}},
-          {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, 128}, {52, 76}},
-          {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 56, 8}, {56, 8}},
-          {{VK_SHADER_STAGE_FRAGMENT_BIT, 60, 36}, {60, 36}}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 8, 4, false}, {8, 4}},
+          {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, 128, false}, {52, 76}},
+          {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 56, 8, false}, {56, 8}},
+          {{VK_SHADER_STAGE_FRAGMENT_BIT, 60, 36, false}, {60, 36}}}},
         // overlapping range count is 5, use vertex, tessellation, geometry and fragment shaders
         {"overlap_5_shaders_vert_tess_geom_frag",
          5u,
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 40, 8}, {40, 8}},
-          {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 32, 12}, {32, 12}},
-          {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 48, 16}, {48, 16}},
-          {{VK_SHADER_STAGE_GEOMETRY_BIT, 28, 36}, {28, 36}},
-          {{VK_SHADER_STAGE_FRAGMENT_BIT, 56, 8}, {60, 4}}}}};
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 40, 8, false}, {40, 8}},
+          {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 32, 12, false}, {32, 12}},
+          {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 48, 16, false}, {48, 16}},
+          {{VK_SHADER_STAGE_GEOMETRY_BIT, 28, 36, false}, {28, 36}},
+          {{VK_SHADER_STAGE_FRAGMENT_BIT, 56, 8, false}, {60, 4}}}}};
 
     static const struct
     {
@@ -3410,13 +3513,13 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
         {
             "simple_test",
             CTT_SIMPLE,
-            {{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16}, {0, 16}},
+            {{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, false}, {0, 16}},
         },
         // test push constant that is dynamically unused
         {
             "uninitialized",
             CTT_UNINITIALIZED,
-            {{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16}, {0, 16}},
+            {{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, false}, {0, 16}},
         },
     };
 
@@ -3428,7 +3531,7 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
     } lifetimeParams[] = {
         // bind different layout with the same range
         {"push_range0_bind_layout1",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}},
          {
              {CMD_PUSH_CONSTANT, 0},
              {CMD_BIND_PIPELINE_GRAPHICS, 1},
@@ -3436,7 +3539,7 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // bind layout with same range then push different range
         {"push_range1_bind_layout1_push_range0",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}},
          {
              {CMD_PUSH_CONSTANT, 1},
              {CMD_BIND_PIPELINE_GRAPHICS, 1},
@@ -3446,7 +3549,7 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // same range same layout then same range from a different layout and same range from the same layout
         {"push_range0_bind_layout0_push_range1_push_range0",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}},
          {
              {CMD_PUSH_CONSTANT, 0},
              {CMD_BIND_PIPELINE_GRAPHICS, 0},
@@ -3456,7 +3559,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // same range same layout then diff range and same range update
         {"push_range0_bind_layout0_push_diff_overlapping_range1_push_range0",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 16, 32}, {16, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}},
+          {{VK_SHADER_STAGE_VERTEX_BIT, 16, 32, false}, {16, 32}}},
          {
              {CMD_PUSH_CONSTANT, 0},
              {CMD_BIND_PIPELINE_GRAPHICS, 0},
@@ -3466,7 +3570,7 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // update push constant bind different layout with the same range then bind correct layout
         {"push_range0_bind_layout1_bind_layout0",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}}},
          {
              {CMD_PUSH_CONSTANT, 0},
              {CMD_BIND_PIPELINE_GRAPHICS, 1},
@@ -3475,7 +3579,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // update push constant then bind different layout with overlapping range then bind correct layout
         {"push_range0_bind_layout1_overlapping_range_bind_layout0",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 16, 32}, {16, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}},
+          {{VK_SHADER_STAGE_VERTEX_BIT, 16, 32, false}, {16, 32}}},
          {
              {CMD_PUSH_CONSTANT, 0},
              {CMD_BIND_PIPELINE_GRAPHICS, 1},
@@ -3484,7 +3589,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // bind different layout with different range then update push constant and bind correct layout
         {"bind_layout1_push_range0_bind_layout0",
-         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32}, {0, 32}}, {{VK_SHADER_STAGE_VERTEX_BIT, 16, 32}, {16, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 32, false}, {0, 32}},
+          {{VK_SHADER_STAGE_VERTEX_BIT, 16, 32, false}, {16, 32}}},
          {
              {CMD_BIND_PIPELINE_GRAPHICS, 1},
              {CMD_PUSH_CONSTANT, 0},
@@ -3493,8 +3599,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // change pipeline same range, bind then push, stages vertex and compute
         {"pipeline_change_same_range_bind_push_vert_and_comp",
-         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, 32}, {0, 32}},
-          {{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, 32}, {0, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, false}, {0, 32}},
+          {{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, false}, {0, 32}}},
          {
              {CMD_BIND_PIPELINE_GRAPHICS, 0},
              {CMD_BIND_PIPELINE_COMPUTE, 1},
@@ -3505,8 +3611,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
          }},
         // change pipeline different range overlapping, bind then push, stages vertex and compute
         {"pipeline_change_diff_range_bind_push_vert_and_comp",
-         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, 32}, {0, 32}},
-          {{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 16, 32}, {16, 32}}},
+         {{{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, false}, {0, 32}},
+          {{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 16, 32, false}, {16, 32}}},
          {
              {CMD_BIND_PIPELINE_GRAPHICS, 0},
              {CMD_BIND_PIPELINE_COMPUTE, 1},
@@ -3566,7 +3672,7 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 // no shader stage using push constants
                 {"unused_disjoint_1",
                  1u,
-                 {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 4}, {0, 4}}},
+                 {{{VK_SHADER_STAGE_VERTEX_BIT, 0, 4, false}, {0, 4}}},
                  false,
                  INDEX_TYPE_CONST_LITERAL,
                  PC_USE_STAGE_NONE
@@ -3577,8 +3683,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_disjoint_2",
                  2u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
                  },
                  false,
                  INDEX_TYPE_CONST_LITERAL,
@@ -3588,9 +3694,9 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_disjoint_3",
                  3u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
-                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4}, {20, 4}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
+                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4, false}, {20, 4}},
                  },
                  false,
                  INDEX_TYPE_CONST_LITERAL,
@@ -3600,9 +3706,9 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_disjoint_4",
                  3u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
-                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4}, {20, 4}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
+                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4, false}, {20, 4}},
                  },
                  false,
                  INDEX_TYPE_CONST_LITERAL,
@@ -3612,11 +3718,11 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_disjoint_5",
                  5u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
-                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4}, {20, 4}},
-                     {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 24, 4}, {24, 4}},
-                     {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 32, 16}, {32, 16}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
+                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4, false}, {20, 4}},
+                     {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 24, 4, false}, {24, 4}},
+                     {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 32, 16, false}, {32, 16}},
                  },
                  false,
                  INDEX_TYPE_CONST_LITERAL,
@@ -3626,11 +3732,11 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_disjoint_6",
                  5u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4}, {16, 4}},
-                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4}, {20, 4}},
-                     {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 24, 4}, {24, 4}},
-                     {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 32, 16}, {32, 16}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 16, 4, false}, {16, 4}},
+                     {{VK_SHADER_STAGE_GEOMETRY_BIT, 20, 4, false}, {20, 4}},
+                     {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 24, 4, false}, {24, 4}},
+                     {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 32, 16, false}, {32, 16}},
                  },
                  false,
                  INDEX_TYPE_CONST_LITERAL,
@@ -3659,8 +3765,8 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_overlap_1",
                  2u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 12, 36}, {12, 36}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 12, 36, false}, {12, 36}},
                  },
                  PC_USE_STAGE_NONE},
                 // overlapping range count is 2, use vertex and fragment shaders
@@ -3668,45 +3774,45 @@ tcu::TestCaseGroup *createPushConstantTests(tcu::TestContext &testCtx,
                 {"unused_overlap_2",
                  2u,
                  {
-                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16}, {0, 16}},
-                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 12, 36}, {12, 36}},
+                     {{VK_SHADER_STAGE_VERTEX_BIT, 0, 16, false}, {0, 16}},
+                     {{VK_SHADER_STAGE_FRAGMENT_BIT, 12, 36, false}, {12, 36}},
                  },
                  PC_USE_STAGE_VERTEX},
                 // overlapping range count is 3, use vertex, geometry and fragment shaders
                 // no shader stage using push constants
                 {"unused_overlap_3",
                  3u,
-                 {{{VK_SHADER_STAGE_VERTEX_BIT, 12, 36}, {12, 36}},
-                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 0, 32}, {16, 16}},
-                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 20, 4}, {20, 4}}},
+                 {{{VK_SHADER_STAGE_VERTEX_BIT, 12, 36, false}, {12, 36}},
+                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 0, 32, false}, {16, 16}},
+                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 20, 4, false}, {20, 4}}},
                  PC_USE_STAGE_NONE},
                 // overlapping range count is 3, use vertex, geometry and fragment shaders
                 // geometry shader using push constants, vertex and fragment shader not using push constants
                 {"unused_overlap_4",
                  3u,
-                 {{{VK_SHADER_STAGE_VERTEX_BIT, 12, 36}, {12, 36}},
-                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 0, 32}, {16, 16}},
-                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 20, 4}, {20, 4}}},
+                 {{{VK_SHADER_STAGE_VERTEX_BIT, 12, 36, false}, {12, 36}},
+                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 0, 32, false}, {16, 16}},
+                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 20, 4, false}, {20, 4}}},
                  PC_USE_STAGE_GEOM},
                 // overlapping range count is 5, use vertex, tessellation, geometry and fragment shaders
                 // no shader stage using push constants
                 {"unused_overlap_5",
                  5u,
-                 {{{VK_SHADER_STAGE_VERTEX_BIT, 40, 8}, {40, 8}},
-                  {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 32, 12}, {32, 12}},
-                  {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 48, 16}, {48, 16}},
-                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 28, 36}, {28, 36}},
-                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 56, 8}, {60, 4}}},
+                 {{{VK_SHADER_STAGE_VERTEX_BIT, 40, 8, false}, {40, 8}},
+                  {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 32, 12, false}, {32, 12}},
+                  {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 48, 16, false}, {48, 16}},
+                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 28, 36, false}, {28, 36}},
+                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 56, 8, false}, {60, 4}}},
                  PC_USE_STAGE_NONE},
                 // overlapping range count is 5, use vertex, tessellation, geometry and fragment shaders
                 // tess shader stages using push constants, vertex, geometry and fragment shader not using push constants
                 {"unused_overlap_6",
                  5u,
-                 {{{VK_SHADER_STAGE_VERTEX_BIT, 40, 8}, {40, 8}},
-                  {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 32, 12}, {32, 12}},
-                  {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 48, 16}, {48, 16}},
-                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 28, 36}, {28, 36}},
-                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 56, 8}, {60, 4}}},
+                 {{{VK_SHADER_STAGE_VERTEX_BIT, 40, 8, false}, {40, 8}},
+                  {{VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 32, 12, false}, {32, 12}},
+                  {{VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 48, 16, false}, {48, 16}},
+                  {{VK_SHADER_STAGE_GEOMETRY_BIT, 28, 36, false}, {28, 36}},
+                  {{VK_SHADER_STAGE_FRAGMENT_BIT, 56, 8, false}, {60, 4}}},
                  PC_USE_STAGE_TESC | PC_USE_STAGE_TESE}};
 
             for (int ndx = 0; ndx < DE_LENGTH_OF_ARRAY(unusedOverlapPCTestParams); ndx++)

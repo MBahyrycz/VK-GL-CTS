@@ -144,6 +144,8 @@ static bool isFeatureSupported(const vkt::Context &ctx, const std::string &featu
         return ctx.getBufferDeviceAddressFeatures().bufferDeviceAddress;
     if (feature == "DepthClampZeroOneFeatures.depthClampZeroOne")
         return ctx.getDepthClampZeroOneFeatures().depthClampZeroOne;
+    if (feature == "ShaderLongVectorFeaturesEXT.longVector")
+        return ctx.getShaderLongVectorFeaturesEXT().longVector;
 
     std::string message = std::string("Unexpected feature name: ") + feature;
     TCU_THROW(InternalError, message.c_str());
@@ -551,20 +553,6 @@ tcu::TestStatus AmberTestInstance::iterate(void)
     amber_options.engine         = amber::kEngineTypeVulkan;
     amber_options.config         = createEngineConfig(m_context, m_customDevice);
     amber_options.execution_type = amber::ExecutionType::kExecute;
-
-    // Amber should not execute any graphic related shaders when using --deqp-compute-only=enable flag
-    if (m_context.getTestContext().getCommandLine().isComputeOnly())
-    {
-        std::vector<amber::ShaderInfo> shaders_info = m_recipe->GetShaderInfo();
-
-        for (amber::ShaderInfo info : shaders_info)
-        {
-            if (info.type != amber::ShaderType::kShaderTypeCompute)
-            {
-                TCU_THROW(NotSupportedError, "Non compute shaders are not allow when using --deqp-compute-only=enable");
-            }
-        }
-    }
 
     // Check for extensions as declared by the Amber script itself.  Throw an internal
     // error if that's more demanding.

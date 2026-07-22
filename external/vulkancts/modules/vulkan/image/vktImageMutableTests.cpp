@@ -122,6 +122,7 @@ struct CaseDef
     enum Upload upload;
     enum Download download;
     bool isFormatListTest;
+    bool extendedFlags;
     Type wsiType;
     ResolveAttachmentTestType resolveAttachmentTestType;
     bool isLoadOpClearTest;
@@ -911,7 +912,7 @@ public:
     {
     }
 
-    void runSwapchain(Context &context, VkBuffer buffer, VkImage image);
+    void runSwapchain(Context &context, VkBuffer buffer, VkImage image, VkSemaphore imageReadySemaphore);
 
     void run(Context &context, VkBuffer buffer);
 
@@ -1028,7 +1029,8 @@ private:
     VkAccessFlagBits m_imageUploadAccessMask;
 };
 
-void UploadDownloadExecutor::runSwapchain(Context &context, VkBuffer buffer, VkImage image)
+void UploadDownloadExecutor::runSwapchain(Context &context, VkBuffer buffer, VkImage image,
+                                          VkSemaphore imageReadySemaphore)
 {
     m_imageIsIntegerFormat = isUintFormat(m_caseDef.imageFormat) || isIntFormat(m_caseDef.imageFormat);
     m_viewIsIntegerFormat  = isUintFormat(m_caseDef.viewFormat) || isIntFormat(m_caseDef.viewFormat);
@@ -1073,7 +1075,8 @@ void UploadDownloadExecutor::runSwapchain(Context &context, VkBuffer buffer, VkI
     }
 
     endCommandBuffer(m_vk, *m_cmdBuffer);
-    submitCommandsAndWait(m_vk, m_device, m_queue, *m_cmdBuffer);
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    submitCommandsAndWait(m_vk, m_device, m_queue, *m_cmdBuffer, false, 1u, 1u, &imageReadySemaphore, &waitStage);
 }
 
 void UploadDownloadExecutor::run(Context &context, VkBuffer buffer)
@@ -1215,9 +1218,20 @@ void UploadDownloadExecutor::uploadStore(Context &context)
         nullptr,                                        // const void*            pNext
         VK_IMAGE_USAGE_STORAGE_BIT,                     // VkImageUsageFlags usage;
     };
+    const void *viewUsageInfoPtr = &viewUsageCreateInfo;
+#ifndef CTS_USES_VULKANSC
+    const vk::VkImageViewUsage2CreateInfoKHR viewUsage2CreateInfo = {
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR, // VkStructureType        sType
+        nullptr,                                              // const void*            pNext
+        VK_IMAGE_USAGE_2_STORAGE_BIT_KHR,                     // VkImageUsageFlags2KHR  usage;
+    };
+    if (m_caseDef.extendedFlags)
+        viewUsageInfoPtr = static_cast<const void *>(&viewUsage2CreateInfo);
+#endif
+
     m_uStore.imageView = makeImageView(m_vk, m_device, m_image, getImageViewType(m_caseDef.imageType),
                                        m_caseDef.viewFormat, makeColorSubresourceRange(0, m_caseDef.numLayers),
-                                       m_haveMaintenance2 ? &viewUsageCreateInfo : nullptr);
+                                       m_haveMaintenance2 ? viewUsageInfoPtr : nullptr);
 
     // Setup compute pipeline
     m_uStore.descriptorPool = DescriptorPoolBuilder()
@@ -1405,6 +1419,16 @@ void UploadDownloadExecutor::uploadDraw(Context &context)
         nullptr,                                        // const void*            pNext
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,            // VkImageUsageFlags usage;
     };
+    const void *viewUsageInfoPtr = &viewUsageCreateInfo;
+#ifndef CTS_USES_VULKANSC
+    const vk::VkImageViewUsage2CreateInfoKHR viewUsage2CreateInfo = {
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR, // VkStructureType        sType
+        nullptr,                                              // const void*            pNext
+        VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR,            // VkImageUsageFlags2KHR  usage;
+    };
+    if (m_caseDef.extendedFlags)
+        viewUsageInfoPtr = static_cast<const void *>(&viewUsage2CreateInfo);
+#endif
 
     // Create multisampled attachment view
     if (m_caseDef.resolveAttachmentTestType)
@@ -1413,7 +1437,7 @@ void UploadDownloadExecutor::uploadDraw(Context &context)
         {
             Move<VkImageView> multiSampledImageView = makeImageView(
                 m_vk, m_device, m_multisampledImage, getImageViewType(m_caseDef.imageType), m_caseDef.viewFormat,
-                makeColorSubresourceRange(subpassNdx, 1), m_haveMaintenance2 ? &viewUsageCreateInfo : nullptr);
+                makeColorSubresourceRange(subpassNdx, 1), m_haveMaintenance2 ? viewUsageInfoPtr : nullptr);
 
             // Add multisampled image first in attachments as we did in the renderpass
             m_uDraw.attachmentHandles.push_back(*multiSampledImageView);
@@ -1423,9 +1447,9 @@ void UploadDownloadExecutor::uploadDraw(Context &context)
 
     for (uint32_t subpassNdx = 0; subpassNdx < m_caseDef.numLayers; ++subpassNdx)
     {
-        Move<VkImageView> imageView = makeImageView(m_vk, m_device, m_image, getImageViewType(m_caseDef.imageType),
-                                                    m_caseDef.viewFormat, makeColorSubresourceRange(subpassNdx, 1),
-                                                    m_haveMaintenance2 ? &viewUsageCreateInfo : nullptr);
+        Move<VkImageView> imageView =
+            makeImageView(m_vk, m_device, m_image, getImageViewType(m_caseDef.imageType), m_caseDef.viewFormat,
+                          makeColorSubresourceRange(subpassNdx, 1), m_haveMaintenance2 ? viewUsageInfoPtr : nullptr);
         m_uDraw.attachmentHandles.push_back(*imageView);
         m_uDraw.attachments.push_back(makeSharedPtr(imageView));
 
@@ -1501,9 +1525,19 @@ void UploadDownloadExecutor::downloadTexture(Context &context, VkBuffer buffer)
         nullptr,                                        // const void*            pNext
         VK_IMAGE_USAGE_SAMPLED_BIT,                     // VkImageUsageFlags usage;
     };
+    const void *viewUsageInfoPtr = &viewUsageCreateInfo;
+#ifndef CTS_USES_VULKANSC
+    const vk::VkImageViewUsage2CreateInfoKHR viewUsage2CreateInfo = {
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR, // VkStructureType        sType
+        nullptr,                                              // const void*            pNext
+        VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR,                     // VkImageUsageFlags2KHR  usage;
+    };
+    if (m_caseDef.extendedFlags)
+        viewUsageInfoPtr = static_cast<const void *>(&viewUsage2CreateInfo);
+#endif
     m_dTex.inImageView = makeImageView(m_vk, m_device, m_image, getImageViewType(m_caseDef.imageType),
                                        m_caseDef.viewFormat, makeColorSubresourceRange(0, m_caseDef.numLayers),
-                                       m_haveMaintenance2 ? &viewUsageCreateInfo : nullptr);
+                                       m_haveMaintenance2 ? viewUsageInfoPtr : nullptr);
     m_dTex.sampler     = makeSampler(m_vk, m_device);
 
     // Setup compute pipeline
@@ -1591,9 +1625,19 @@ void UploadDownloadExecutor::downloadLoad(Context &context, VkBuffer buffer)
         nullptr,                                        // const void*            pNext
         VK_IMAGE_USAGE_STORAGE_BIT,                     // VkImageUsageFlags usage;
     };
+    const void *viewUsageInfoPtr = &viewUsageCreateInfo;
+#ifndef CTS_USES_VULKANSC
+    const vk::VkImageViewUsage2CreateInfoKHR viewUsage2CreateInfo = {
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_2_CREATE_INFO_KHR, // VkStructureType        sType
+        nullptr,                                              // const void*            pNext
+        VK_IMAGE_USAGE_2_STORAGE_BIT_KHR,                     // VkImageUsageFlags2KHR  usage;
+    };
+    if (m_caseDef.extendedFlags)
+        viewUsageInfoPtr = static_cast<const void *>(&viewUsage2CreateInfo);
+#endif
     m_dLoad.inImageView = makeImageView(m_vk, m_device, m_image, getImageViewType(m_caseDef.imageType),
                                         m_caseDef.viewFormat, makeColorSubresourceRange(0, m_caseDef.numLayers),
-                                        m_haveMaintenance2 ? &viewUsageCreateInfo : nullptr);
+                                        m_haveMaintenance2 ? viewUsageInfoPtr : nullptr);
 
     // Setup compute pipeline
     m_dLoad.descriptorPool = DescriptorPoolBuilder()
@@ -1851,6 +1895,9 @@ void checkSupport(Context &context, const CaseDef caseDef)
     if (getMaxAvailableSampleCount(context, caseDef.imageFormat, getImageType(caseDef.imageType), usage, imageFlags) ==
         VK_SAMPLE_COUNT_1_BIT)
         TCU_THROW(NotSupportedError, "Maximum available sample count is VK_SAMPLE_COUNT_1_BIT");
+
+    if (caseDef.extendedFlags)
+        context.requireDeviceFunctionality("VK_KHR_extended_flags");
 }
 
 tcu::TestCaseGroup *createImageMutableTests(TestContext &testCtx)
@@ -1888,6 +1935,7 @@ tcu::TestCaseGroup *createImageMutableTests(TestContext &testCtx)
                                 static_cast<enum Upload>(upload),
                                 static_cast<enum Download>(download),
                                 false,                                   // isFormatListTest;
+                                false,                                   // extendedFlags
                                 vk::wsi::TYPE_LAST,                      // wsiType
                                 ResolveAttachmentTestType::RA_TEST_NONE, // resolveAttachmentTestType
                                 false                                    // isLoadOpClearTest
@@ -1899,10 +1947,21 @@ tcu::TestCaseGroup *createImageMutableTests(TestContext &testCtx)
                             addFunctionCaseWithPrograms(groupByImageViewType.get(), caseName, checkSupport,
                                                         initPrograms, testMutable, caseDef);
 
-                            caseDef.isFormatListTest = true;
-                            caseName += "_format_list";
-                            addFunctionCaseWithPrograms(groupByImageViewType.get(), caseName, checkSupport,
+                            caseDef.isFormatListTest       = true;
+                            std::string formatListCaseName = caseName + "_format_list";
+                            addFunctionCaseWithPrograms(groupByImageViewType.get(), formatListCaseName, checkSupport,
                                                         initPrograms, testMutable, caseDef);
+
+                            if (s_formats[imageFormatNdx] == VK_FORMAT_R32G32B32A32_SFLOAT ||
+                                s_formats[imageFormatNdx] == VK_FORMAT_R8G8B8A8_UNORM ||
+                                s_formats[imageFormatNdx] == VK_FORMAT_R32_UINT)
+                            {
+                                caseDef.isFormatListTest          = false;
+                                caseDef.extendedFlags             = true;
+                                std::string extendedFlagsCaseName = caseName + "_extended_flags";
+                                addFunctionCaseWithPrograms(groupByImageViewType.get(), extendedFlagsCaseName,
+                                                            checkSupport, initPrograms, testMutable, caseDef);
+                            }
                         }
                     }
 
@@ -1918,6 +1977,7 @@ tcu::TestCaseGroup *createImageMutableTests(TestContext &testCtx)
                             UPLOAD_DRAW,
                             DOWNLOAD_COPY,
                             false,                                          // isFormatListTest;
+                            false,                                          // extendedFlags
                             vk::wsi::TYPE_LAST,                             // wsiType
                             ResolveAttachmentTestType::RA_TEST_ALL_MUTABLE, // resolveAttachmentTestType
                             false                                           // isLoadOpClearTest
@@ -1963,6 +2023,7 @@ tcu::TestCaseGroup *createImageMutableTests(TestContext &testCtx)
                             UPLOAD_DRAW,
                             DOWNLOAD_COPY,
                             false,                                   // isFormatListTest;
+                            false,                                   // extendedFlags
                             vk::wsi::TYPE_LAST,                      // wsiType
                             ResolveAttachmentTestType::RA_TEST_NONE, // resolveAttachmentTestType
                             true                                     // isLoadOpClearTest
@@ -2006,9 +2067,19 @@ CustomInstance createInstanceWithWsi(Context &context, const Extensions &support
     if (isDisplaySurface(wsiType))
         extensions.push_back("VK_KHR_display");
 
-    // VUID-vkCreateInstance-ppEnabledExtensionNames-01388
     if (wsiType == TYPE_DIRECT_DRM)
+    {
+        // VUID-vkCreateInstance-ppEnabledExtensionNames-01388
         extensions.push_back("VK_EXT_direct_mode_display");
+
+        // used by VulkanDisplayDirectDrm::initializeDisplay
+        extensions.push_back("VK_EXT_physical_device_drm");
+
+        // required by VK_EXT_physical_device_drm
+        uint32_t apiVersion = context.getUsedApiVersion();
+        if (!isCoreInstanceExtension(apiVersion, "VK_KHR_get_physical_device_properties2"))
+            extensions.push_back("VK_KHR_get_physical_device_properties2");
+    }
 
     // VK_EXT_swapchain_colorspace adds new surface formats. Driver can enumerate
     // the formats regardless of whether VK_EXT_swapchain_colorspace was enabled,
@@ -2028,13 +2099,9 @@ CustomInstance createInstanceWithWsi(Context &context, const Extensions &support
     return createCustomInstanceWithExtensions(context, extensions, pAllocator);
 }
 
-Move<VkDevice> createDeviceWithWsi(const PlatformInterface &vkp, VkInstance instance, const InstanceInterface &vki,
-                                   VkPhysicalDevice physicalDevice, const Extensions &supportedExtensions,
-                                   const uint32_t queueFamilyIndex, const VkAllocationCallbacks *pAllocator,
-#ifdef CTS_USES_VULKANSC
-                                   de::SharedPtr<vk::ResourceInterface> resourceInterface,
-#endif // CTS_USES_VULKANSC
-                                   const tcu::CommandLine &cmdLine)
+static CustomDevice createDeviceWithWsi(const InstanceWrapper &instance, VkPhysicalDevice physicalDevice,
+                                        const Extensions &supportedExtensions, const uint32_t queueFamilyIndex,
+                                        const VkAllocationCallbacks *pAllocator)
 {
     const float queuePriorities[]              = {1.0f};
     const VkDeviceQueueCreateInfo queueInfos[] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr,
@@ -2045,46 +2112,8 @@ Move<VkDevice> createDeviceWithWsi(const PlatformInterface &vkp, VkInstance inst
 
     const char *const extensions[] = {"VK_KHR_swapchain", "VK_KHR_swapchain_mutable_format"};
 
-    void *pNext = nullptr;
-#ifdef CTS_USES_VULKANSC
-    VkDeviceObjectReservationCreateInfo memReservationInfo =
-        cmdLine.isSubProcess() ? resourceInterface->getStatMax() : resetDeviceObjectReservationCreateInfo();
-    memReservationInfo.pNext = pNext;
-    pNext                    = &memReservationInfo;
-
-    VkPhysicalDeviceVulkanSC10Features sc10Features = createDefaultSC10Features();
-    sc10Features.pNext                              = pNext;
-    pNext                                           = &sc10Features;
-
-    VkPipelineCacheCreateInfo pcCI;
-    std::vector<VkPipelinePoolSize> poolSizes;
-    if (cmdLine.isSubProcess())
-    {
-        if (resourceInterface->getCacheDataSize() > 0)
-        {
-            pcCI = {
-                VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, // VkStructureType sType;
-                nullptr,                                      // const void* pNext;
-                VK_PIPELINE_CACHE_CREATE_READ_ONLY_BIT |
-                    VK_PIPELINE_CACHE_CREATE_USE_APPLICATION_STORAGE_BIT, // VkPipelineCacheCreateFlags flags;
-                resourceInterface->getCacheDataSize(),                    // uintptr_t initialDataSize;
-                resourceInterface->getCacheData()                         // const void* pInitialData;
-            };
-            memReservationInfo.pipelineCacheCreateInfoCount = 1;
-            memReservationInfo.pPipelineCacheCreateInfos    = &pcCI;
-        }
-
-        poolSizes = resourceInterface->getPipelinePoolSizes();
-        if (!poolSizes.empty())
-        {
-            memReservationInfo.pipelinePoolSizeCount = uint32_t(poolSizes.size());
-            memReservationInfo.pPipelinePoolSizes    = poolSizes.data();
-        }
-    }
-#endif // CTS_USES_VULKANSC
-
     const VkDeviceCreateInfo deviceParams = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                                             pNext,
+                                             nullptr,
                                              (VkDeviceCreateFlags)0,
                                              DE_LENGTH_OF_ARRAY(queueInfos),
                                              &queueInfos[0],
@@ -2100,15 +2129,14 @@ Move<VkDevice> createDeviceWithWsi(const PlatformInterface &vkp, VkInstance inst
             TCU_THROW(NotSupportedError, (string(extensions[ndx]) + " is not supported").c_str());
     }
 
-    return createCustomDevice(cmdLine.isValidationEnabled(), vkp, instance, vki, physicalDevice, &deviceParams,
-                              pAllocator);
+    return instance.createCustomDevice(physicalDevice, &deviceParams, pAllocator);
 }
 
 struct InstanceHelper
 {
     const vector<VkExtensionProperties> supportedExtensions;
-    const CustomInstance instance;
-    const InstanceDriver &vki;
+    const InstanceWrapper instance;
+    const InstanceInterface &vki;
 
     InstanceHelper(Context &context, Type wsiType, const VkAllocationCallbacks *pAllocator = nullptr)
         : supportedExtensions(enumerateInstanceExtensionProperties(context.getPlatformInterface(), nullptr))
@@ -2122,23 +2150,18 @@ struct DeviceHelper
 {
     const VkPhysicalDevice physicalDevice;
     const uint32_t queueFamilyIndex;
-    const Unique<VkDevice> device;
-    const DeviceDriver vkd;
+    const DeviceWrapper device;
+    const DeviceInterface &vkd;
     const VkQueue queue;
 
-    DeviceHelper(Context &context, const InstanceInterface &vki, VkInstance instance, VkSurfaceKHR surface,
+    DeviceHelper(const InstanceHelper &instanceHelper, VkSurfaceKHR surface,
                  const VkAllocationCallbacks *pAllocator = nullptr)
-        : physicalDevice(chooseDevice(vki, instance, context.getTestContext().getCommandLine()))
-        , queueFamilyIndex(chooseQueueFamilyIndex(vki, physicalDevice, surface))
-        , device(createDeviceWithWsi(context.getPlatformInterface(), context.getInstance(), vki, physicalDevice,
-                                     enumerateDeviceExtensionProperties(vki, physicalDevice, nullptr), queueFamilyIndex,
-                                     pAllocator,
-#ifdef CTS_USES_VULKANSC
-                                     context.getResourceInterface(),
-#endif // CTS_USES_VULKANSC
-                                     context.getTestContext().getCommandLine()))
-        , vkd(context.getPlatformInterface(), context.getInstance(), *device, context.getUsedApiVersion(),
-              context.getTestContext().getCommandLine())
+        : physicalDevice(instanceHelper.instance.getPhysicalDevice())
+        , queueFamilyIndex(chooseQueueFamilyIndex(instanceHelper.vki, physicalDevice, surface))
+        , device(createDeviceWithWsi(instanceHelper.instance, physicalDevice,
+                                     enumerateDeviceExtensionProperties(instanceHelper.vki, physicalDevice, nullptr),
+                                     queueFamilyIndex, pAllocator))
+        , vkd(device.getDriver())
         , queue(getDeviceQueue(vkd, *device, queueFamilyIndex, 0))
     {
     }
@@ -2250,12 +2273,12 @@ tcu::TestStatus testSwapchainMutable(Context &context, CaseDef caseDef)
     const NativeObjects native(context, instHelper.supportedExtensions, wsiType, tcu::just(desiredSize));
     const Unique<VkSurfaceKHR> surface(createSurface(instHelper.vki, instHelper.instance, wsiType, *native.display,
                                                      *native.window, context.getTestContext().getCommandLine()));
-    const DeviceHelper devHelper(context, instHelper.vki, instHelper.instance, *surface);
+    const DeviceHelper devHelper(instHelper, *surface);
     const DeviceInterface &vk         = devHelper.vkd;
-    const InstanceDriver &vki         = instHelper.vki;
+    const InstanceInterface &vki      = instHelper.vki;
     const VkDevice device             = *devHelper.device;
     const VkPhysicalDevice physDevice = devHelper.physicalDevice;
-    SimpleAllocator allocator(vk, device, getPhysicalDeviceMemoryProperties(vki, context.getPhysicalDevice()));
+    SimpleAllocator allocator(vk, device, getPhysicalDeviceMemoryProperties(vki, physDevice));
 
     const VkImageUsageFlags imageUsage = getImageUsageForTestCase(caseDef);
 
@@ -2316,6 +2339,11 @@ tcu::TestStatus testSwapchainMutable(Context &context, CaseDef caseDef)
                                                          imageUsage, desiredSize, 2));
     const vector<VkImage> swapchainImages = getSwapchainImages(vk, device, *swapchain);
 
+    uint32_t imageNdx;
+    const auto imageReadySemaphore = createSemaphore(vk, device);
+    vk.acquireNextImageKHR(device, *swapchain, std::numeric_limits<uint64_t>::max(), *imageReadySemaphore,
+                           VK_NULL_HANDLE, &imageNdx);
+
     // Create a color buffer for host-inspection of results
     // For the Copy download method, this is the target of the download, for other
     // download methods, pixel data will be copied to this buffer from the download
@@ -2331,7 +2359,7 @@ tcu::TestStatus testSwapchainMutable(Context &context, CaseDef caseDef)
     // Execute the test
     UploadDownloadExecutor executor(context, false, vk, device, devHelper.queue, devHelper.queueFamilyIndex, caseDef);
 
-    executor.runSwapchain(context, *colorBuffer, swapchainImages[0]);
+    executor.runSwapchain(context, *colorBuffer, swapchainImages[imageNdx], *imageReadySemaphore);
 
     // Verify results
     {
@@ -2401,7 +2429,8 @@ tcu::TestCaseGroup *createSwapchainImageMutableTests(TestContext &testCtx)
                                     s_swapchainFormats[viewFormatNdx],
                                     static_cast<enum Upload>(upload),
                                     static_cast<enum Download>(download),
-                                    true, // isFormatListTest;
+                                    true,  // isFormatListTest;
+                                    false, // extendedFlags
                                     wsiType,
                                     ResolveAttachmentTestType::RA_TEST_NONE, // resolveAttachmentTestType
                                     false                                    // isLoadOpClearTest

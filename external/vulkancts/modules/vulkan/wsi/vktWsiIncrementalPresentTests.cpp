@@ -88,6 +88,10 @@ CustomInstance createInstanceWithWsi(Context &context, const Extensions &support
     if (isDisplaySurface(wsiType))
         extensions.push_back("VK_KHR_display");
 
+    // VUID-vkCreateInstance-ppEnabledExtensionNames-01388
+    if (wsiType == vk::wsi::TYPE_DIRECT_DRM)
+        extensions.push_back("VK_EXT_direct_mode_display");
+
     // VUID-VkSwapchainCreateInfoKHR-imageColorSpace-parameter
     if (isExtensionStructSupported(supportedExtensions, vk::RequiredExtension("VK_EXT_swapchain_colorspace")))
         extensions.push_back("VK_EXT_swapchain_colorspace");
@@ -97,24 +101,19 @@ CustomInstance createInstanceWithWsi(Context &context, const Extensions &support
     return vkt::createCustomInstanceWithExtensions(context, extensions);
 }
 
-vk::VkPhysicalDeviceFeatures getDeviceNullFeatures(void)
-{
-    vk::VkPhysicalDeviceFeatures features;
-    deMemset(&features, 0, sizeof(features));
-    return features;
-}
-
-vk::Move<vk::VkDevice> createDeviceWithWsi(const vk::PlatformInterface &vkp, vk::VkInstance instance,
-                                           const vk::InstanceInterface &vki, vk::VkPhysicalDevice physicalDevice,
-                                           const Extensions &supportedExtensions, const uint32_t queueFamilyIndex,
-                                           bool requiresIncrementalPresent, bool validationEnabled,
-                                           const vk::VkAllocationCallbacks *pAllocator = nullptr)
+static CustomDevice createDeviceWithWsi(const InstanceWrapper &instance, vk::VkPhysicalDevice physicalDevice,
+                                        const Extensions &supportedExtensions, const uint32_t queueFamilyIndex,
+                                        bool requiresIncrementalPresent,
+                                        const vk::VkAllocationCallbacks *pAllocator = nullptr)
 {
     const float queuePriorities[]                  = {1.0f};
     const vk::VkDeviceQueueCreateInfo queueInfos[] = {{vk::VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr,
                                                        (vk::VkDeviceQueueCreateFlags)0, queueFamilyIndex,
                                                        DE_LENGTH_OF_ARRAY(queuePriorities), &queuePriorities[0]}};
-    const vk::VkPhysicalDeviceFeatures features    = getDeviceNullFeatures();
+
+    vk::VkPhysicalDeviceFeatures2 features                                            = vk::initVulkanStructure();
+    vk::VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR fifoLatestReadyFeatures = vk::initVulkanStructure();
+    fifoLatestReadyFeatures.presentModeFifoLatestReady                                = VK_TRUE;
 
     std::vector<const char *> extensions;
     extensions.push_back("VK_KHR_swapchain");
@@ -125,8 +124,14 @@ vk::Move<vk::VkDevice> createDeviceWithWsi(const vk::PlatformInterface &vkp, vk:
     if (isExtensionStructSupported(supportedExtensions, vk::RequiredExtension("VK_EXT_swapchain_colorspace")))
         extensions.push_back("VK_EXT_swapchain_colorspace");
 
+    if (isExtensionStructSupported(supportedExtensions, vk::RequiredExtension("VK_EXT_present_mode_fifo_latest_ready")))
+    {
+        extensions.push_back("VK_EXT_present_mode_fifo_latest_ready");
+        features.pNext = &fifoLatestReadyFeatures;
+    }
+
     const vk::VkDeviceCreateInfo deviceParams = {vk::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-                                                 nullptr,
+                                                 &features,
                                                  (vk::VkDeviceCreateFlags)0,
                                                  DE_LENGTH_OF_ARRAY(queueInfos),
                                                  &queueInfos[0],
@@ -134,7 +139,7 @@ vk::Move<vk::VkDevice> createDeviceWithWsi(const vk::PlatformInterface &vkp, vk:
                                                  nullptr,
                                                  static_cast<uint32_t>(extensions.size()),
                                                  extensions.data(),
-                                                 &features};
+                                                 nullptr};
 
     for (size_t ndx = 0; ndx < extensions.size(); ++ndx)
     {
@@ -142,7 +147,7 @@ vk::Move<vk::VkDevice> createDeviceWithWsi(const vk::PlatformInterface &vkp, vk:
             TCU_THROW(NotSupportedError, (string(extensions[ndx]) + " is not supported").c_str());
     }
 
-    return createCustomDevice(validationEnabled, vkp, instance, vki, physicalDevice, &deviceParams, pAllocator);
+    return instance.createCustomDevice(physicalDevice, &deviceParams, pAllocator);
 }
 
 de::MovePtr<vk::wsi::Display> createDisplay(const vk::Platform &platform, const Extensions &supportedExtensions,
@@ -510,8 +515,8 @@ private:
     const bool m_useIncrementalPresent;
     const vk::PlatformInterface &m_vkp;
     const Extensions m_instanceExtensions;
-    const CustomInstance m_instance;
-    const vk::InstanceDriver &m_vki;
+    const InstanceWrapper m_instance;
+    const vk::InstanceInterface &m_vki;
     const vk::VkPhysicalDevice m_physicalDevice;
     const vk::wsi::Type m_wsiType;
     const de::UniquePtr<vk::wsi::Display> m_nativeDisplay;
@@ -520,8 +525,8 @@ private:
 
     const uint32_t m_queueFamilyIndex;
     const Extensions m_deviceExtensions;
-    const vk::Unique<vk::VkDevice> m_device;
-    const vk::DeviceDriver m_vkd;
+    const DeviceWrapper m_device;
+    const vk::DeviceInterface &m_vkd;
     const vk::VkQueue m_queue;
 
     const vk::Unique<vk::VkCommandPool> m_commandPool;
@@ -566,6 +571,37 @@ private:
     void deinitSwapchainResources(void);
     void render(void);
 };
+
+// Select representative surface formats: one SRGB_NONLINEAR
+// and one extended color space format to validate VK_EXT_swapchain_colorspace functionality
+vector<vk::VkSurfaceFormatKHR> selectRepresentativeFormats(const vector<vk::VkSurfaceFormatKHR> &formats)
+{
+    vector<vk::VkSurfaceFormatKHR> result;
+
+    for (const auto &fmt : formats)
+    {
+        if (fmt.colorSpace == vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            result.push_back(fmt);
+            break;
+        }
+    }
+
+    for (const auto &fmt : formats)
+    {
+        if (fmt.colorSpace != vk::VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            result.push_back(fmt);
+            break;
+        }
+    }
+
+    // If no formats matched use whatever is available
+    if (result.empty() && !formats.empty())
+        result.push_back(formats[0]);
+
+    return result;
+}
 
 std::vector<vk::VkSwapchainCreateInfoKHR> generateSwapchainConfigs(
     vk::VkSurfaceKHR surface, const uint32_t *queueFamilyIndex, Scaling scaling,
@@ -624,13 +660,16 @@ std::vector<vk::VkSwapchainCreateInfoKHR> generateSwapchainConfigs(
             TCU_THROW(NotSupportedError, "Composite alpha not supported");
     }
 
-    for (size_t formatNdx = 0; formatNdx < formats.size(); formatNdx++)
+    // Select representative subset of formats to avoid testing all color space variations
+    const vector<vk::VkSurfaceFormatKHR> selectedFormats = selectRepresentativeFormats(formats);
+
+    for (size_t formatNdx = 0; formatNdx < selectedFormats.size(); formatNdx++)
     {
 
         const vk::VkSurfaceTransformFlagBitsKHR preTransform = (vk::VkSurfaceTransformFlagBitsKHR)transform;
         const vk::VkCompositeAlphaFlagBitsKHR compositeAlpha = (vk::VkCompositeAlphaFlagBitsKHR)alpha;
-        const vk::VkFormat imageFormat                       = formats[formatNdx].format;
-        const vk::VkColorSpaceKHR imageColorSpace            = formats[formatNdx].colorSpace;
+        const vk::VkFormat imageFormat                       = selectedFormats[formatNdx].format;
+        const vk::VkColorSpaceKHR imageColorSpace            = selectedFormats[formatNdx].colorSpace;
         const vk::VkSwapchainCreateInfoKHR createInfo        = {vk::VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
                                                                 nullptr,
                                                                 0u,
@@ -686,7 +725,7 @@ IncrementalPresentTestInstance::IncrementalPresentTestInstance(Context &context,
     , m_instanceExtensions(vk::enumerateInstanceExtensionProperties(m_vkp, nullptr))
     , m_instance(createInstanceWithWsi(context, m_instanceExtensions, testConfig.wsiType))
     , m_vki(m_instance.getDriver())
-    , m_physicalDevice(vk::chooseDevice(m_vki, m_instance, context.getTestContext().getCommandLine()))
+    , m_physicalDevice(m_instance.getPhysicalDevice())
     , m_wsiType(testConfig.wsiType)
     , m_nativeDisplay(createDisplay(context.getTestContext().getPlatform().getVulkanPlatform(), m_instanceExtensions,
                                     testConfig.wsiType))
@@ -696,10 +735,9 @@ IncrementalPresentTestInstance::IncrementalPresentTestInstance(Context &context,
 
     , m_queueFamilyIndex(vk::wsi::chooseQueueFamilyIndex(m_vki, m_physicalDevice, *m_surface))
     , m_deviceExtensions(vk::enumerateDeviceExtensionProperties(m_vki, m_physicalDevice, nullptr))
-    , m_device(createDeviceWithWsi(m_vkp, m_instance, m_vki, m_physicalDevice, m_deviceExtensions, m_queueFamilyIndex,
-                                   testConfig.useIncrementalPresent,
-                                   context.getTestContext().getCommandLine().isValidationEnabled()))
-    , m_vkd(m_vkp, m_instance, *m_device, context.getUsedApiVersion(), context.getTestContext().getCommandLine())
+    , m_device(createDeviceWithWsi(m_instance, m_physicalDevice, m_deviceExtensions, m_queueFamilyIndex,
+                                   testConfig.useIncrementalPresent))
+    , m_vkd(m_device.getDriver())
     , m_queue(getDeviceQueue(m_vkd, *m_device, m_queueFamilyIndex, 0u))
 
     , m_commandPool(createCommandPool(m_vkd, *m_device, m_queueFamilyIndex))

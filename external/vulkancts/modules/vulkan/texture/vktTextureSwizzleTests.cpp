@@ -139,7 +139,7 @@ Swizzle2DTestInstance::Swizzle2DTestInstance(Context &context, const ParameterTy
               new pipeline::TestTexture2D(m_compressedFormat, testParameters.width, testParameters.height) :
               new pipeline::TestTexture2D(m_format, testParameters.width, testParameters.height)))
     , m_renderer(context, testParameters.sampleCount, testParameters.width, testParameters.height,
-                 testParameters.componentMapping)
+                 testParameters.componentMapping, false, false, m_testParameters.useCompute)
 {
     m_renderer.add2DTexture(m_texture, testParameters.aspectMask, testParameters.backingMode);
 }
@@ -322,60 +322,43 @@ void populateTextureSwizzleTests(tcu::TestCaseGroup *textureSwizzleTests)
                           {VK_FORMAT_R5G5B5A1_UNORM_PACK16, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R8_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R8_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R8_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8_SRGB, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8G8_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8G8_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R8G8_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R8G8_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8G8_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R8G8_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8G8_SRGB, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8G8B8_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8G8B8_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R8G8B8_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R8G8B8_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8G8B8_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R8G8B8_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8G8B8_SRGB, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8G8B8A8_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R8G8B8A8_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R8G8B8A8_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R8G8B8A8_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8G8B8A8_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R8G8B8A8_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R8G8B8A8_SRGB, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_A2R10G10B10_UNORM_PACK32, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_A2R10G10B10_UINT_PACK32, PROGRAM_2D_UINT},
-                          {VK_FORMAT_A2B10G10R10_USCALED_PACK32, PROGRAM_2D_UINT},
                           {VK_FORMAT_R16_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R16_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R16_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R16_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R16_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16_SFLOAT, PROGRAM_2D_FLOAT_BIAS},
                           {VK_FORMAT_R16G16_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R16G16_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R16G16_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R16G16_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16G16_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R16G16_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16G16_SFLOAT, PROGRAM_2D_FLOAT_BIAS},
                           {VK_FORMAT_R16G16B16_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R16G16B16_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R16G16B16_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R16G16B16_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16G16B16_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R16G16B16_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16G16B16_SFLOAT, PROGRAM_2D_FLOAT_BIAS},
                           {VK_FORMAT_R16G16B16A16_UNORM, PROGRAM_2D_FLOAT},
                           {VK_FORMAT_R16G16B16A16_SNORM, PROGRAM_2D_FLOAT_BIAS},
-                          {VK_FORMAT_R16G16B16A16_USCALED, PROGRAM_2D_UINT},
-                          {VK_FORMAT_R16G16B16A16_SSCALED, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16G16B16A16_UINT, PROGRAM_2D_UINT},
                           {VK_FORMAT_R16G16B16A16_SINT, PROGRAM_2D_INT_BIAS},
                           {VK_FORMAT_R16G16B16A16_SFLOAT, PROGRAM_2D_FLOAT_BIAS},
@@ -534,9 +517,15 @@ void populateTextureSwizzleTests(tcu::TestCaseGroup *textureSwizzleTests)
                     testParameters.magFilter        = tcu::Sampler::NEAREST;
                     testParameters.aspectMask       = VK_IMAGE_ASPECT_COLOR_BIT;
                     testParameters.programs.push_back(colorFormats2D[formatNdx].program);
+                    testParameters.useCompute = false;
 
                     groupColor->addChild(
                         new SwizzleTestCase<Swizzle2DTestInstance>(testCtx, caseName.c_str(), testParameters));
+
+                    // Compute case.
+                    testParameters.useCompute = true;
+                    groupColor->addChild(new SwizzleTestCase<Swizzle2DTestInstance>(
+                        testCtx, (caseName + "_compute").c_str(), testParameters));
                 }
     groupCompMap->addChild(groupColor.release());
 
@@ -560,9 +549,15 @@ void populateTextureSwizzleTests(tcu::TestCaseGroup *textureSwizzleTests)
                 testParameters.magFilter        = tcu::Sampler::NEAREST;
                 testParameters.aspectMask       = VK_IMAGE_ASPECT_DEPTH_BIT;
                 testParameters.programs.push_back(depthFormats2D[formatNdx].program);
+                testParameters.useCompute = false;
 
                 groupDepth->addChild(
                     new SwizzleTestCase<Swizzle2DTestInstance>(testCtx, caseName.c_str(), testParameters));
+
+                //Compute case.
+                testParameters.useCompute = true;
+                groupDepth->addChild(new SwizzleTestCase<Swizzle2DTestInstance>(
+                    testCtx, (caseName + "_compute").c_str(), testParameters));
             }
     groupCompMap->addChild(groupDepth.release());
 
@@ -585,9 +580,15 @@ void populateTextureSwizzleTests(tcu::TestCaseGroup *textureSwizzleTests)
                 testParameters.magFilter        = tcu::Sampler::NEAREST;
                 testParameters.aspectMask       = VK_IMAGE_ASPECT_STENCIL_BIT;
                 testParameters.programs.push_back(stencilFormats2D[formatNdx].program);
+                testParameters.useCompute = false;
 
                 groupStencil->addChild(
                     new SwizzleTestCase<Swizzle2DTestInstance>(testCtx, caseName.c_str(), testParameters));
+
+                //Compute case.
+                testParameters.useCompute = true;
+                groupStencil->addChild(new SwizzleTestCase<Swizzle2DTestInstance>(
+                    testCtx, (caseName + "_compute").c_str(), testParameters));
             }
     groupCompMap->addChild(groupStencil.release());
 #endif // CTS_USES_VULKANSC
@@ -615,9 +616,15 @@ void populateTextureSwizzleTests(tcu::TestCaseGroup *textureSwizzleTests)
                     testParameters.magFilter        = tcu::Sampler::NEAREST;
                     testParameters.aspectMask       = VK_IMAGE_ASPECT_COLOR_BIT;
                     testParameters.programs.push_back(colorFormats2D[formatNdx].program);
+                    testParameters.useCompute = false;
 
                     groupTexCoord->addChild(
                         new SwizzleTestCase<Swizzle2DTestInstance>(testCtx, caseName.c_str(), testParameters));
+
+                    // Compute case.
+                    testParameters.useCompute = true;
+                    groupTexCoord->addChild(new SwizzleTestCase<Swizzle2DTestInstance>(
+                        testCtx, (caseName + "_compute").c_str(), testParameters));
                 }
 
     textureSwizzleTests->addChild(groupCompMap.release());

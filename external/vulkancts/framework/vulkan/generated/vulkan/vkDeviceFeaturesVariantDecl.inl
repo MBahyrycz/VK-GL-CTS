@@ -84,6 +84,7 @@ typedef std::variant<
     , VkPhysicalDeviceHostImageCopyFeatures
     , VkPhysicalDeviceMapMemoryPlacedFeaturesEXT
     , VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT
+    , VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT
     , VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures
     , VkPhysicalDeviceDeviceGeneratedCommandsFeaturesNV
     , VkPhysicalDeviceInheritedViewportScissorFeaturesNV
@@ -122,6 +123,7 @@ typedef std::variant<
     , VkPhysicalDeviceAddressBindingReportFeaturesEXT
     , VkPhysicalDeviceDepthClipControlFeaturesEXT
     , VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT
+    , VkPhysicalDevicePresentModeFifoLatestReadyFeaturesEXT
     , VkPhysicalDeviceSubpassShadingFeaturesHUAWEI
     , VkPhysicalDeviceInvocationMaskFeaturesHUAWEI
     , VkPhysicalDeviceExternalMemoryRDMAFeaturesNV
@@ -132,8 +134,6 @@ typedef std::variant<
     , VkPhysicalDeviceColorWriteEnableFeaturesEXT
     , VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
     , VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR
-    , VkPhysicalDeviceShaderUntypedPointersFeaturesKHR
-    , VkPhysicalDeviceVideoEncodeRgbConversionFeaturesVALVE
     , VkPhysicalDeviceImageViewMinLodFeaturesEXT
     , VkPhysicalDeviceMultiDrawFeaturesEXT
     , VkPhysicalDeviceImage2DViewOf3DFeaturesEXT
@@ -150,6 +150,7 @@ typedef std::variant<
     , VkPhysicalDeviceDescriptorSetHostMappingFeaturesVALVE
     , VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT
     , VkPhysicalDeviceRenderPassStripedFeaturesARM
+    , VkPhysicalDeviceCopyMemoryIndirectFeaturesNV
     , VkPhysicalDeviceMemoryDecompressionFeaturesNV
     , VkPhysicalDeviceDeviceGeneratedCommandsComputeFeaturesNV
     , VkPhysicalDeviceRayTracingLinearSweptSpheresFeaturesNV
@@ -160,7 +161,6 @@ typedef std::variant<
     , VkPhysicalDeviceNestedCommandBufferFeaturesEXT
     , VkPhysicalDeviceExtendedDynamicState3FeaturesEXT
     , VkPhysicalDeviceSubpassMergeFeedbackFeaturesEXT
-    , VkPhysicalDeviceTensorFeaturesARM
     , VkPhysicalDeviceShaderModuleIdentifierFeaturesEXT
     , VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT
     , VkPhysicalDeviceOpticalFlowFeaturesNV
@@ -169,15 +169,11 @@ typedef std::variant<
     , VkPhysicalDeviceExternalFormatResolveFeaturesANDROID
     , VkPhysicalDeviceMaintenance5Features
     , VkPhysicalDeviceAntiLagFeaturesAMD
-    , VkPhysicalDeviceDenseGeometryFormatFeaturesAMDX
-    , VkPhysicalDevicePresentId2FeaturesKHR
-    , VkPhysicalDevicePresentWait2FeaturesKHR
     , VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR
     , VkPhysicalDeviceShaderObjectFeaturesEXT
     , VkPhysicalDevicePipelineBinaryFeaturesKHR
     , VkPhysicalDeviceTilePropertiesFeaturesQCOM
     , VkPhysicalDeviceAmigoProfilingFeaturesSEC
-    , VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR
     , VkPhysicalDeviceMultiviewPerViewViewportsFeaturesQCOM
     , VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV
     , VkPhysicalDeviceCooperativeVectorFeaturesNV
@@ -188,11 +184,9 @@ typedef std::variant<
     , VkPhysicalDevicePipelineLibraryGroupHandlesFeaturesEXT
     , VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT
     , VkPhysicalDeviceCooperativeMatrixFeaturesKHR
-    , VkPhysicalDeviceDataGraphFeaturesARM
     , VkPhysicalDeviceMultiviewPerViewRenderAreasFeaturesQCOM
     , VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR
     , VkPhysicalDeviceVideoEncodeAV1FeaturesKHR
-    , VkPhysicalDeviceVideoDecodeVP9FeaturesKHR
     , VkPhysicalDeviceVideoMaintenance1FeaturesKHR
     , VkPhysicalDevicePerStageDescriptorSetFeaturesNV
     , VkPhysicalDeviceImageProcessing2FeaturesQCOM
@@ -201,7 +195,6 @@ typedef std::variant<
     , VkPhysicalDeviceCubicClampFeaturesQCOM
     , VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT
     , VkPhysicalDeviceVertexAttributeDivisorFeatures
-    , VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR
     , VkPhysicalDeviceShaderFloatControls2Features
     , VkPhysicalDeviceExternalMemoryScreenBufferFeaturesQNX
     , VkPhysicalDeviceIndexTypeUint8Features
@@ -210,8 +203,6 @@ typedef std::variant<
     , VkPhysicalDeviceMaintenance6Features
     , VkPhysicalDeviceDescriptorPoolOverallocationFeaturesNV
     , VkPhysicalDeviceTileMemoryHeapFeaturesQCOM
-    , VkPhysicalDeviceCopyMemoryIndirectFeaturesKHR
-    , VkPhysicalDeviceVideoEncodeIntraRefreshFeaturesKHR
     , VkPhysicalDeviceVideoEncodeQuantizationMapFeaturesKHR
     , VkPhysicalDeviceRawAccessChainsFeaturesNV
     , VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR
@@ -219,30 +210,24 @@ typedef std::variant<
     , VkPhysicalDeviceMaintenance7FeaturesKHR
     , VkPhysicalDeviceShaderAtomicFloat16VectorFeaturesNV
     , VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT
-    , VkPhysicalDeviceShaderFloat8FeaturesEXT
     , VkPhysicalDeviceRayTracingValidationFeaturesNV
     , VkPhysicalDeviceClusterAccelerationStructureFeaturesNV
     , VkPhysicalDevicePartitionedAccelerationStructureFeaturesNV
     , VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT
     , VkPhysicalDeviceMaintenance8FeaturesKHR
     , VkPhysicalDeviceImageAlignmentControlFeaturesMESA
-    , VkPhysicalDeviceShaderFmaFeaturesKHR
     , VkPhysicalDeviceDepthClampControlFeaturesEXT
-    , VkPhysicalDeviceMaintenance9FeaturesKHR
     , VkPhysicalDeviceVideoMaintenance2FeaturesKHR
     , VkPhysicalDeviceHdrVividFeaturesHUAWEI
     , VkPhysicalDeviceCooperativeMatrix2FeaturesNV
     , VkPhysicalDevicePipelineOpacityMicromapFeaturesARM
     , VkPhysicalDeviceDepthClampZeroOneFeaturesKHR
-    , VkPhysicalDeviceFormatPackFeaturesARM
-    , VkPhysicalDeviceFragmentDensityMapLayeredFeaturesVALVE
+    , VkPhysicalDeviceVertexAttributeRobustnessFeaturesEXT
     , VkPhysicalDeviceRobustness2FeaturesKHR
     , VkPhysicalDevicePresentMeteringFeaturesNV
+    , VkPhysicalDeviceMultisampledRenderToSwapchainFeaturesEXT
     , VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT
     , VkPhysicalDeviceZeroInitializeDeviceMemoryFeaturesEXT
-    , VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR
-    , VkPhysicalDeviceCustomResolveFeaturesEXT
-    , VkPhysicalDevicePipelineCacheIncrementalModeFeaturesSEC
     , VkPhysicalDeviceProtectedMemoryFeatures
     , VkPhysicalDeviceShaderDrawParametersFeatures
 > ImplementedFeaturesVariant;

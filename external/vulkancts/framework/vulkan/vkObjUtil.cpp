@@ -113,7 +113,7 @@ Move<VkPipeline> makeGraphicsPipeline(
     const VkPipelineDepthStencilStateCreateInfo *depthStencilStateCreateInfo,
     const VkPipelineColorBlendStateCreateInfo *colorBlendStateCreateInfo,
     const VkPipelineDynamicStateCreateInfo *dynamicStateCreateInfo, const void *pNext,
-    const VkPipelineCreateFlags pipelineCreateFlags)
+    const VkPipelineCreateFlags pipelineCreateFlags, const void *stagePNext)
 {
     const VkPipelineInputAssemblyStateCreateInfo inputAssemblyStateCreateInfo = {
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, // VkStructureType                            sType
@@ -159,12 +159,13 @@ Move<VkPipeline> makeGraphicsPipeline(
     const VkPipelineDynamicStateCreateInfo *dynamicStateCreateInfoDefaultPtr =
         dynamicStates.empty() ? nullptr : &dynamicStateCreateInfoDefault;
 
-    return makeGraphicsPipeline(
-        vk, device, pipelineLayout, vertexShaderModule, tessellationControlShaderModule, tessellationEvalShaderModule,
-        geometryShaderModule, fragmentShaderModule, renderPass, subpass, vertexInputStateCreateInfo,
-        &inputAssemblyStateCreateInfo, &tessStateCreateInfo, &viewportStateCreateInfo, rasterizationStateCreateInfo,
-        multisampleStateCreateInfo, depthStencilStateCreateInfo, colorBlendStateCreateInfo,
-        dynamicStateCreateInfo ? dynamicStateCreateInfo : dynamicStateCreateInfoDefaultPtr, pNext, pipelineCreateFlags);
+    return makeGraphicsPipeline(vk, device, pipelineLayout, vertexShaderModule, tessellationControlShaderModule,
+                                tessellationEvalShaderModule, geometryShaderModule, fragmentShaderModule, renderPass,
+                                subpass, vertexInputStateCreateInfo, &inputAssemblyStateCreateInfo,
+                                &tessStateCreateInfo, &viewportStateCreateInfo, rasterizationStateCreateInfo,
+                                multisampleStateCreateInfo, depthStencilStateCreateInfo, colorBlendStateCreateInfo,
+                                dynamicStateCreateInfo ? dynamicStateCreateInfo : dynamicStateCreateInfoDefaultPtr,
+                                pNext, pipelineCreateFlags, stagePNext);
 }
 
 Move<VkPipeline> makeGraphicsPipeline(const DeviceInterface &vk, const VkDevice device,
@@ -183,7 +184,7 @@ Move<VkPipeline> makeGraphicsPipeline(const DeviceInterface &vk, const VkDevice 
                                       const VkPipelineDepthStencilStateCreateInfo *depthStencilStateCreateInfo,
                                       const VkPipelineColorBlendStateCreateInfo *colorBlendStateCreateInfo,
                                       const VkPipelineDynamicStateCreateInfo *dynamicStateCreateInfo, const void *pNext,
-                                      const VkPipelineCreateFlags pipelineCreateFlags)
+                                      const VkPipelineCreateFlags pipelineCreateFlags, const void *stagePNext)
 {
     DE_ASSERT(tessStateCreateInfo ||
               (tessellationControlShaderModule == VK_NULL_HANDLE && tessellationEvalShaderModule == VK_NULL_HANDLE));
@@ -192,7 +193,7 @@ Move<VkPipeline> makeGraphicsPipeline(const DeviceInterface &vk, const VkDevice 
 
     VkPipelineShaderStageCreateInfo stageCreateInfo = {
         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, // VkStructureType                     sType
-        nullptr,                                             // const void*                         pNext
+        stagePNext,                                          // const void*                         pNext
         0u,                                                  // VkPipelineShaderStageCreateFlags    flags
         VK_SHADER_STAGE_VERTEX_BIT,                          // VkShaderStageFlagBits               stage
         VK_NULL_HANDLE,                                      // VkShaderModule                      module
@@ -698,12 +699,11 @@ Move<VkRenderPass> makeRenderPass(const DeviceInterface &vk, const VkDevice devi
 
 Move<VkImageView> makeImageView(const DeviceInterface &vk, const VkDevice vkDevice, const VkImage image,
                                 const VkImageViewType imageViewType, const VkFormat format,
-                                const VkImageSubresourceRange subresourceRange,
-                                const VkImageViewUsageCreateInfo *imageUsageCreateInfo)
+                                const VkImageSubresourceRange subresourceRange, const void *pNext)
 {
     const VkImageViewCreateInfo imageViewParams = {
         VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, // VkStructureType sType;
-        imageUsageCreateInfo,                     // const void* pNext;
+        pNext,                                    // const void* pNext;
         0u,                                       // VkImageViewCreateFlags flags;
         image,                                    // VkImage image;
         imageViewType,                            // VkImageViewType viewType;

@@ -38,12 +38,14 @@ Move<VkSurfaceKHR>					createWin32SurfaceKHR				(const InstanceInterface& vk, Vk
 Move<VkVideoSessionKHR>				createVideoSessionKHR				(const DeviceInterface& vk, VkDevice device, const VkVideoSessionCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkVideoSessionParametersKHR>	createVideoSessionParametersKHR		(const DeviceInterface& vk, VkDevice device, const VkVideoSessionParametersCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkDeferredOperationKHR>		createDeferredOperationKHR			(const DeviceInterface& vk, VkDevice device, const VkAllocationCallbacks* pAllocator = nullptr);
+Move<VkAccelerationStructureKHR>	createAccelerationStructure2KHR		(const DeviceInterface& vk, VkDevice device, const VkAccelerationStructureCreateInfo2KHR* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkDebugReportCallbackEXT>		createDebugReportCallbackEXT		(const InstanceInterface& vk, VkInstance instance, const VkDebugReportCallbackCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createStreamDescriptorSurfaceGGP	(const InstanceInterface& vk, VkInstance instance, const VkStreamDescriptorSurfaceCreateInfoGGP* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createViSurfaceNN					(const InstanceInterface& vk, VkInstance instance, const VkViSurfaceCreateInfoNN* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createIOSSurfaceMVK					(const InstanceInterface& vk, VkInstance instance, const VkIOSSurfaceCreateInfoMVK* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createMacOSSurfaceMVK				(const InstanceInterface& vk, VkInstance instance, const VkMacOSSurfaceCreateInfoMVK* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkDebugUtilsMessengerEXT>		createDebugUtilsMessengerEXT		(const InstanceInterface& vk, VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
+Move<VkGpaSessionAMD>				createGpaSessionAMD					(const DeviceInterface& vk, VkDevice device, const VkGpaSessionCreateInfoAMD* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkAccelerationStructureNV>		createAccelerationStructureNV		(const DeviceInterface& vk, VkDevice device, const VkAccelerationStructureCreateInfoNV* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createImagePipeSurfaceFUCHSIA		(const InstanceInterface& vk, VkInstance instance, const VkImagePipeSurfaceCreateInfoFUCHSIA* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createMetalSurfaceEXT				(const InstanceInterface& vk, VkInstance instance, const VkMetalSurfaceCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
@@ -58,4 +60,5 @@ Move<VkDataGraphPipelineSessionARM>	createDataGraphPipelineSessionARM	(const Dev
 Move<VkIndirectCommandsLayoutEXT>	createIndirectCommandsLayoutEXT		(const DeviceInterface& vk, VkDevice device, const VkIndirectCommandsLayoutCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkIndirectExecutionSetEXT>		createIndirectExecutionSetEXT		(const DeviceInterface& vk, VkDevice device, const VkIndirectExecutionSetCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkSurfaceKHR>					createSurfaceOHOS					(const InstanceInterface& vk, VkInstance instance, const VkSurfaceCreateInfoOHOS* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
+Move<VkSurfaceKHR>					createUbmSurfaceSEC					(const InstanceInterface& vk, VkInstance instance, const VkUbmSurfaceCreateInfoSEC* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);
 Move<VkAccelerationStructureKHR>	createAccelerationStructureKHR		(const DeviceInterface& vk, VkDevice device, const VkAccelerationStructureCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator = nullptr);

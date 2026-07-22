@@ -128,17 +128,9 @@ void copyAndFlush(const vk::DeviceInterface &vkd, vk::VkDevice device, vk::Buffe
     vk::flushAlloc(vkd, device, alloc);
 }
 
-#ifndef CTS_USES_VULKANSC
-typedef de::MovePtr<vk::DeviceDriver> DeviceDriverPtr;
-#else
-typedef de::MovePtr<vk::DeviceDriverSC, vk::DeinitDeviceDeleter> DeviceDriverPtr;
-#endif // CTS_USES_VULKANSC
-
-typedef vk::Move<vk::VkDevice> DevicePtr;
-
-vk::Move<vk::VkDevice> createRobustBufferAccessDevice(Context &context,
-                                                      const std::vector<std::string> &enabledDeviceExtensions,
-                                                      const vk::VkPhysicalDeviceFeatures2 *enabledFeatures2)
+static CustomDevice createRobustBufferAccessDevice(Context &context, const InstanceWrapper &instance,
+                                                   const std::vector<std::string> &enabledDeviceExtensions,
+                                                   const vk::VkPhysicalDeviceFeatures2 *enabledFeatures2)
 {
     const float queuePriority = 1.0f;
 
@@ -159,48 +151,9 @@ vk::Move<vk::VkDevice> createRobustBufferAccessDevice(Context &context,
     for (const auto &ext : enabledDeviceExtensions)
         extensionPtrs.push_back(ext.c_str());
 
-    void *pNext = (void *)enabledFeatures2;
-#ifdef CTS_USES_VULKANSC
-    VkDeviceObjectReservationCreateInfo memReservationInfo = context.getTestContext().getCommandLine().isSubProcess() ?
-                                                                 context.getResourceInterface()->getStatMax() :
-                                                                 resetDeviceObjectReservationCreateInfo();
-    memReservationInfo.pNext                               = pNext;
-    pNext                                                  = &memReservationInfo;
-
-    VkPhysicalDeviceVulkanSC10Features sc10Features = createDefaultSC10Features();
-    sc10Features.pNext                              = pNext;
-    pNext                                           = &sc10Features;
-
-    VkPipelineCacheCreateInfo pcCI;
-    std::vector<VkPipelinePoolSize> poolSizes;
-    if (context.getTestContext().getCommandLine().isSubProcess())
-    {
-        if (context.getResourceInterface()->getCacheDataSize() > 0)
-        {
-            pcCI = {
-                VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, // VkStructureType sType;
-                nullptr,                                      // const void* pNext;
-                VK_PIPELINE_CACHE_CREATE_READ_ONLY_BIT |
-                    VK_PIPELINE_CACHE_CREATE_USE_APPLICATION_STORAGE_BIT, // VkPipelineCacheCreateFlags flags;
-                context.getResourceInterface()->getCacheDataSize(),       // uintptr_t initialDataSize;
-                context.getResourceInterface()->getCacheData()            // const void* pInitialData;
-            };
-            memReservationInfo.pipelineCacheCreateInfoCount = 1;
-            memReservationInfo.pPipelineCacheCreateInfos    = &pcCI;
-        }
-
-        poolSizes = context.getResourceInterface()->getPipelinePoolSizes();
-        if (!poolSizes.empty())
-        {
-            memReservationInfo.pipelinePoolSizeCount = uint32_t(poolSizes.size());
-            memReservationInfo.pPipelinePoolSizes    = poolSizes.data();
-        }
-    }
-#endif
-
     const vk::VkDeviceCreateInfo deviceParams = {
         vk::VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,      // VkStructureType sType;
-        pNext,                                         // const void* pNext;
+        enabledFeatures2,                              // const void* pNext;
         0u,                                            // VkDeviceCreateFlags flags;
         1u,                                            // uint32_t queueCreateInfoCount;
         &queueParams,                                  // const VkDeviceQueueCreateInfo* pQueueCreateInfos;
@@ -214,12 +167,7 @@ vk::Move<vk::VkDevice> createRobustBufferAccessDevice(Context &context,
     // We are creating a custom device with a potentially large amount of extensions and features enabled, using the default device
     // as a reference. Some implementations may only enable certain device extensions if some instance extensions are enabled, so in
     // this case it's important to reuse the context instance when creating the device.
-    const auto &vki           = context.getInstanceInterface();
-    const auto instance       = context.getInstance();
-    const auto physicalDevice = chooseDevice(vki, instance, context.getTestContext().getCommandLine());
-
-    return createCustomDevice(context.getTestContext().getCommandLine().isValidationEnabled(),
-                              context.getPlatformInterface(), instance, vki, physicalDevice, &deviceParams);
+    return instance.createCustomDevice(&deviceParams);
 }
 
 enum BeyondType
@@ -600,28 +548,389 @@ tcu::TestStatus BindBuffers2Instance::iterate(void)
     return tcu::TestStatus::pass("Pass");
 }
 
+class BindBuffers2MismatchInstance : public vkt::TestInstance
+{
+public:
+    BindBuffers2MismatchInstance(Context &context, const vk::PipelineConstructionType pipelineConstructionType,
+                                 const TestParams params)
+        : vkt::TestInstance(context)
+        , m_pipelineConstructionType(pipelineConstructionType)
+        , m_params(params)
+    {
+    }
+    virtual ~BindBuffers2MismatchInstance(void)
+    {
+    }
+
+    tcu::TestStatus iterate(void) override;
+
+private:
+    const vk::PipelineConstructionType m_pipelineConstructionType;
+    const TestParams m_params;
+};
+
+tcu::TestStatus BindBuffers2MismatchInstance::iterate(void)
+{
+    const vk::VkInstance instance = m_context.getInstance();
+    const vk::InstanceDriver instanceDriver(m_context.getPlatformInterface(), instance);
+    const vk::InstanceInterface &vki          = m_context.getInstanceInterface();
+    const vk::DeviceInterface &vk             = m_context.getDeviceInterface();
+    const vk::VkPhysicalDevice physicalDevice = m_context.getPhysicalDevice();
+    const vk::VkDevice device                 = m_context.getDevice();
+    const vk::VkQueue queue                   = m_context.getUniversalQueue();
+    const uint32_t queueFamilyIndex           = m_context.getUniversalQueueFamilyIndex();
+    vk::Allocator &allocator                  = m_context.getDefaultAllocator();
+    const auto &deviceExtensions              = m_context.getDeviceExtensions();
+    tcu::TestLog &log                         = m_context.getTestContext().getLog();
+
+    vk::VkExtent2D extent = {32u, 32u};
+
+    const std::vector<vk::VkViewport> viewports{vk::makeViewport(extent)};
+    const std::vector<vk::VkRect2D> scissors{vk::makeRect2D(extent)};
+
+    const vk::VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
+        vk::VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, // VkStructureType sType;
+        nullptr,                                           // const void* pNext;
+        0u,                                                // VkPipelineLayoutCreateFlags flags;
+        0u,                                                // uint32_t descriptorSetCount;
+        nullptr,                                           // const VkDescriptorSetLayout* pSetLayouts;
+        0u,                                                // uint32_t pushConstantRangeCount;
+        nullptr                                            // const VkPushDescriptorRange* pPushDescriptorRanges;
+    };
+
+    const vk::VkImageSubresourceRange colorSubresourceRange =
+        vk::makeImageSubresourceRange(vk::VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u);
+    const vk::Move<vk::VkImage> colorImage(
+        makeImage(vk, device,
+                  makeImageCreateInfo(extent, vk::VK_FORMAT_R32G32B32A32_SFLOAT,
+                                      vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT)));
+    const de::MovePtr<vk::Allocation> colorImageAlloc(
+        bindImage(vk, device, allocator, *colorImage, vk::MemoryRequirement::Any));
+    const vk::Move<vk::VkImageView> colorImageView(makeImageView(
+        vk, device, *colorImage, vk::VK_IMAGE_VIEW_TYPE_2D, vk::VK_FORMAT_R32G32B32A32_SFLOAT, colorSubresourceRange));
+
+    const vk::PipelineLayoutWrapper pipelineLayout(m_pipelineConstructionType, vk, device, &pipelineLayoutInfo);
+    vk::RenderPassWrapper renderPass(m_pipelineConstructionType, vk, device, vk::VK_FORMAT_R32G32B32A32_SFLOAT);
+    renderPass.createFramebuffer(vk, device, *colorImage, *colorImageView, extent.width, extent.height);
+    const vk::ShaderWrapper vertShaderModule =
+        vk::ShaderWrapper(vk, device, m_context.getBinaryCollection().get("vert"));
+    const vk::ShaderWrapper fragShaderModule =
+        vk::ShaderWrapper(vk, device, m_context.getBinaryCollection().get("frag"));
+
+    //buffer to read the output image
+    auto outBuffer = makeBufferForImage(vk, device, allocator, mapVkFormat(vk::VK_FORMAT_R32G32B32A32_SFLOAT), extent);
+    auto &outBufferAlloc = outBuffer->getAllocation();
+
+    std::vector<vk::VkVertexInputAttributeDescription> attributes;
+    std::vector<vk::VkVertexInputBindingDescription> bindings;
+
+    // Special case: Bindings at 0 and 2, skipping 1.
+    // This forces a mismatch between array index (0, 1) and binding index (0, 2).
+    // Array Index 0 -> Binding 0
+    // Array Index 1 -> Binding 2
+    attributes.push_back(makeAttributeDescription(0, 0, vk::VK_FORMAT_R32G32B32A32_SFLOAT, 0)); // Color
+    attributes.push_back(makeAttributeDescription(1, 2, vk::VK_FORMAT_R32G32B32A32_SFLOAT, 0)); // Position
+
+    bindings.push_back(makeBindingDescription(0, 99 /*dynamic*/, vk::VK_VERTEX_INPUT_RATE_INSTANCE));
+    bindings.push_back(makeBindingDescription(2, 99 /*dynamic*/, vk::VK_VERTEX_INPUT_RATE_VERTEX));
+
+    log << tcu::TestLog::Message
+        << "Testing stride to binding index mismatch: Attributes {Loc0->Bind0, Loc1->Bind2}. Bindings {0, 2}."
+        << tcu::TestLog::EndMessage;
+
+    log << tcu::TestLog::Message << "VkVertexInputAttributeDescription:" << tcu::TestLog::EndMessage;
+    for (const auto &attrib : attributes)
+    {
+        log << tcu::TestLog::Message << "location " << attrib.location << ", binding " << attrib.binding << ", format "
+            << attrib.format << tcu::TestLog::EndMessage;
+    }
+
+    log << tcu::TestLog::Message << "VkVertexInputBindingDescription:\n" << tcu::TestLog::EndMessage;
+    for (const auto &binding : bindings)
+    {
+        log << tcu::TestLog::Message << "binding " << binding.binding << ", stride " << binding.stride << ", inputRate "
+            << binding.inputRate << tcu::TestLog::EndMessage;
+    }
+
+    vk::VkPipelineVertexInputStateCreateInfo vertexInputState = vk::initVulkanStructure();
+    vertexInputState.vertexBindingDescriptionCount            = (uint32_t)bindings.size();
+    vertexInputState.pVertexBindingDescriptions               = bindings.data();
+    vertexInputState.vertexAttributeDescriptionCount          = (uint32_t)attributes.size();
+    vertexInputState.pVertexAttributeDescriptions             = attributes.data();
+
+    vk::VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = vk::initVulkanStructure();
+    inputAssemblyState.topology                                   = vk::VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+
+    const vk::VkDynamicState dynamicState = vk::VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE_EXT;
+
+    const vk::VkPipelineDynamicStateCreateInfo dynamicStateInfo = {
+        vk::VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, // VkStructureType sType;
+        nullptr,                                                  // const void* pNext;
+        0u,                                                       // VkPipelineDynamicStateCreateFlags flags;
+        1u,                                                       // uint32_t dynamicStateCount;
+        &dynamicState,                                            // const VkDynamicState* pDynamicStates;
+    };
+
+    vk::GraphicsPipelineWrapper graphicsPipelineWrapper{
+        vki, vk, physicalDevice, device, deviceExtensions, m_pipelineConstructionType};
+    graphicsPipelineWrapper.setDefaultDepthStencilState()
+        .setDefaultColorBlendState()
+        .setDefaultRasterizationState()
+        .setDefaultMultisampleState()
+        .setDynamicState(&dynamicStateInfo)
+        .setupVertexInputState(&vertexInputState, &inputAssemblyState)
+        .setupPreRasterizationShaderState(viewports, scissors, pipelineLayout, renderPass.get(), 0u, vertShaderModule)
+        .setupFragmentShaderState(pipelineLayout, renderPass.get(), 0u, fragShaderModule)
+        .setupFragmentOutputState(renderPass.get())
+        .setMonolithicPipelineLayout(pipelineLayout)
+        .buildPipeline();
+
+    const vk::Move<vk::VkCommandPool> cmdPool(
+        createCommandPool(vk, device, vk::VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, queueFamilyIndex));
+    const vk::Move<vk::VkCommandBuffer> cmdBuffer(
+        allocateCommandBuffer(vk, device, *cmdPool, vk::VK_COMMAND_BUFFER_LEVEL_PRIMARY));
+
+    uint32_t instanceCount        = 4u;
+    vk::VkDeviceSize colorStride  = m_params.colorStride * sizeof(float);
+    vk::VkDeviceSize colorOffset  = m_params.colorOffset * sizeof(float);
+    vk::VkDeviceSize vertexStride = m_params.vertexStride * sizeof(float);
+    vk::VkDeviceSize vertexOffset = m_params.vertexOffset * sizeof(float);
+
+    tcu::Vec4 colors[] = {
+        tcu::Vec4(0.21f, 0.41f, 0.61f, 0.81f),
+        tcu::Vec4(0.22f, 0.42f, 0.62f, 0.82f),
+        tcu::Vec4(0.23f, 0.43f, 0.63f, 0.83f),
+        tcu::Vec4(0.24f, 0.44f, 0.64f, 0.84f),
+    };
+
+    tcu::Vec4 vertices[] = {
+        tcu::Vec4(0.0f, 0.0f, 0.0f, 0.0f),
+        tcu::Vec4(0.0f, 1.0f, 0.0f, 0.0f),
+        tcu::Vec4(1.0f, 0.0f, 0.0f, 0.0f),
+        tcu::Vec4(1.0f, 1.0f, 0.0f, 0.0f),
+    };
+
+    std::vector<float> colorData;
+    for (uint32_t i = 0; i < colorOffset / sizeof(float); ++i)
+        colorData.push_back(0);
+
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        colorData.push_back(colors[i].x());
+        colorData.push_back(colors[i].y());
+        colorData.push_back(colors[i].z());
+        colorData.push_back(colors[i].w());
+        for (uint32_t j = 4; j < colorStride / sizeof(float); ++j)
+            colorData.push_back(0.0f);
+    }
+
+    std::vector<float> vertexData;
+    for (uint32_t i = 0; i < vertexOffset / sizeof(float); ++i)
+        vertexData.push_back(0);
+
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        vertexData.push_back(vertices[i].x());
+        vertexData.push_back(vertices[i].y());
+        vertexData.push_back(vertices[i].z());
+        vertexData.push_back(vertices[i].w());
+        for (uint32_t j = 4; j < vertexStride / sizeof(float); ++j)
+            vertexData.push_back(0.0f);
+    }
+
+    vk::VkClearValue clearColorValue = defaultClearValue(vk::VK_FORMAT_R32G32B32A32_SFLOAT);
+    vk::VkDeviceSize colorDataSize   = colorData.size() * sizeof(float);
+    vk::VkDeviceSize vertexDataSize  = vertexData.size() * sizeof(float);
+
+    // 3 offsets needed: Bind 0, Bind 1 (Gap), Bind 2
+    std::vector<vk::VkDeviceSize> offsets;
+    offsets.push_back(colorOffset);
+    offsets.push_back(0);
+    offsets.push_back(vertexOffset);
+
+    std::vector<de::MovePtr<vk::BufferWithMemory>> colorBuffers;
+    std::vector<de::MovePtr<vk::BufferWithMemory>> vertexBuffers;
+    std::vector<vk::VkBuffer> buffers;
+
+    // Create Buffer for Binding 0
+    const auto colorCreateInfo =
+        vk::makeBufferCreateInfo((colorDataSize + offsets[0]), vk::VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    colorBuffers.emplace_back(de::MovePtr<vk::BufferWithMemory>(
+        new vk::BufferWithMemory(vk, device, allocator, colorCreateInfo, vk::MemoryRequirement::HostVisible)));
+    copyAndFlush(vk, device, *colorBuffers[0], 0, colorData.data(), colorData.size() * sizeof(float));
+    buffers.push_back(**colorBuffers[0]);
+
+    // Create Dummy Buffer for Binding 1 (Gap)
+    buffers.push_back(**colorBuffers[0]); // Reuse existing buffer handle
+
+    // Create Buffer for Binding 2
+    const auto vertexCreateInfo =
+        vk::makeBufferCreateInfo((vertexDataSize + offsets[2]), vk::VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    vertexBuffers.emplace_back(de::MovePtr<vk::BufferWithMemory>(
+        new vk::BufferWithMemory(vk, device, allocator, vertexCreateInfo, vk::MemoryRequirement::HostVisible)));
+    copyAndFlush(vk, device, *vertexBuffers[0], 0, vertexData.data(), vertexData.size() * sizeof(float));
+    buffers.push_back(**vertexBuffers[0]);
+
+    beginCommandBuffer(vk, *cmdBuffer);
+    renderPass.begin(vk, *cmdBuffer, vk::makeRect2D(0, 0, extent.width, extent.height), clearColorValue);
+    graphicsPipelineWrapper.bind(*cmdBuffer);
+
+    std::vector<vk::VkDeviceSize> sizes;
+    sizes.push_back(colorDataSize);
+    sizes.push_back(0); // Binding 1 size
+    sizes.push_back(vertexDataSize);
+
+    std::vector<vk::VkDeviceSize> strides;
+    strides.push_back(colorStride);
+    strides.push_back(0); // Stride for Binding 1 (Trap: if bug exists, this is used for Bind 2)
+    strides.push_back(vertexStride);
+
+#ifndef CTS_USES_VULKANSC
+    vk.cmdBindVertexBuffers2(*cmdBuffer, 0, 3, buffers.data(), offsets.data(), sizes.data(), strides.data());
+#else
+    vk.cmdBindVertexBuffers2EXT(*cmdBuffer, 0, 3, buffers.data(), offsets.data(), sizes.data(), strides.data());
+#endif
+
+    log << tcu::TestLog::Message << "vkCmdBindVertexBuffers2" << tcu::TestLog::EndMessage;
+
+    vk.cmdDraw(*cmdBuffer, 4, instanceCount, 0, 0);
+    renderPass.end(vk, *cmdBuffer);
+
+    vk::copyImageToBuffer(vk, *cmdBuffer, *colorImage, (*outBuffer).get(), tcu::IVec2(extent.width, extent.height));
+    endCommandBuffer(vk, *cmdBuffer);
+
+    submitCommandsAndWait(vk, device, queue, *cmdBuffer);
+
+    invalidateAlloc(vk, device, outBufferAlloc);
+    const tcu::ConstPixelBufferAccess result(vk::mapVkFormat(vk::VK_FORMAT_R32G32B32A32_SFLOAT),
+                                             tcu::IVec3(extent.width, extent.height, 1),
+                                             (const char *)outBufferAlloc.getHostPtr());
+
+    const uint32_t h = result.getHeight();
+    const uint32_t w = result.getWidth();
+    for (uint32_t y = 0; y < h; y++)
+    {
+        for (uint32_t x = 0; x < w; x++)
+        {
+            tcu::Vec4 pix = result.getPixel(x, y);
+
+            if (x >= w / 2 && y >= h / 2 && pix != colors[0])
+            {
+                log << tcu::TestLog::Message << "Color at (" << x << ", " << y << ") was " << pix
+                    << ", but expected color was " << colors[0] << tcu::TestLog::EndMessage;
+                return tcu::TestStatus::fail("Fail");
+            }
+            if (x < w / 2 && y >= h / 2 && pix != colors[colorStride == 0 ? 0 : 1])
+            {
+                log << tcu::TestLog::Message << "Color at (" << x << ", " << y << ") was " << pix
+                    << ", but expected color was " << colors[colorStride == 0 ? 0 : 1] << tcu::TestLog::EndMessage;
+                return tcu::TestStatus::fail("Fail");
+            }
+            if (x >= w / 2 && y < h / 2 && pix != colors[colorStride == 0 ? 0 : 2])
+            {
+                log << tcu::TestLog::Message << "Color at (" << x << ", " << y << ") was " << pix
+                    << ", but expected color was " << colors[colorStride == 0 ? 0 : 2] << tcu::TestLog::EndMessage;
+                return tcu::TestStatus::fail("Fail");
+            }
+            if (x < w / 2 && y < h / 2 && pix != colors[colorStride == 0 ? 0 : 3])
+            {
+                log << tcu::TestLog::Message << "Color at (" << x << ", " << y << ") was " << pix
+                    << ", but expected color was " << colors[colorStride == 0 ? 0 : 3] << tcu::TestLog::EndMessage;
+                return tcu::TestStatus::fail("Fail");
+            }
+        }
+    }
+
+    return tcu::TestStatus::pass("Pass");
+}
+
+class BindBuffers2MismatchCase : public vkt::TestCase
+{
+public:
+    BindBuffers2MismatchCase(tcu::TestContext &testCtx, const std::string &name,
+                             const vk::PipelineConstructionType pipelineConstructionType, const TestParams params)
+        : vkt::TestCase(testCtx, name)
+        , m_pipelineConstructionType(pipelineConstructionType)
+        , m_params(params)
+    {
+    }
+    virtual ~BindBuffers2MismatchCase(void)
+    {
+    }
+
+    void checkSupport(vkt::Context &context) const override;
+    virtual void initPrograms(vk::SourceCollections &programCollection) const override;
+    TestInstance *createInstance(Context &context) const override
+    {
+        return new BindBuffers2MismatchInstance(context, m_pipelineConstructionType, m_params);
+    }
+
+private:
+    const vk::PipelineConstructionType m_pipelineConstructionType;
+    const TestParams m_params;
+};
+
+void BindBuffers2MismatchCase::checkSupport(Context &context) const
+{
+    context.requireDeviceFunctionality("VK_EXT_extended_dynamic_state");
+
+    vk::checkPipelineConstructionRequirements(context.getInstanceInterface(), context.getPhysicalDevice(),
+                                              m_pipelineConstructionType);
+}
+
+void BindBuffers2MismatchCase::initPrograms(vk::SourceCollections &programCollection) const
+{
+    std::stringstream vert;
+    std::stringstream frag;
+
+    std::string inputs;
+    std::string combined;
+
+    inputs   = "layout (location=0) in vec4 rgba;\n"
+               "layout (location=1) in vec4 xyzw;\n";
+    combined = "    vec4 vertex = vec4(xyzw);\n"
+               "    vec4 color = vec4(rgba);\n";
+
+    vert << "#version 450\n"
+         << inputs << "layout (location=0) out vec4 outColor;\n"
+         << "void main() {\n"
+         << "    vec2 pos = vec2(-float(gl_InstanceIndex & 1), -float((gl_InstanceIndex >> 1) & 1));\n"
+         << combined << "    gl_Position = vertex + vec4(pos, 0.0f, 1.0f);\n"
+         << "    outColor = color;\n"
+         << "}\n";
+
+    frag << "#version 450\n"
+         << "layout (location=0) in vec4 inColor;\n"
+         << "layout (location=0) out vec4 outColor;\n"
+         << "void main() {\n"
+         << "    outColor = inColor;\n"
+         << "}\n";
+
+    programCollection.glslSources.add("vert") << glu::VertexSource(vert.str());
+    programCollection.glslSources.add("frag") << glu::FragmentSource(frag.str());
+}
+
 class BindVertexBuffers2Instance : public vkt::TestInstance
 {
 public:
-    BindVertexBuffers2Instance(Context &context, DeviceDriverPtr driver, DevicePtr device,
+    BindVertexBuffers2Instance(Context &context, InstanceWrapper &&instance, DeviceWrapper &&device,
                                vk::PipelineConstructionType pipelineConstructionType, const TestParamsMaint5 &params,
                                bool robustness2, const std::vector<std::string> &enabledDeviceExtensions)
         : vkt::TestInstance(context)
         , m_pipelineConstructionType(pipelineConstructionType)
         , m_params(params)
         , m_robustness2(robustness2)
-        , m_deviceDriver(driver)
-        , m_device(device)
-        , m_physicalDevice(chooseDevice(context.getInstanceInterface(), context.getInstance(),
-                                        context.getTestContext().getCommandLine()))
-        , m_allocator(getDeviceInterface(), getDevice(),
-                      getPhysicalDeviceMemoryProperties(context.getInstanceInterface(), m_physicalDevice))
+        , m_instance(std::move(instance))
+        , m_device(std::move(device))
+        , m_physicalDevice(robustness2 ? m_device.getPhysicalDevice() : context.getPhysicalDevice())
         , m_enabledDeviceExtensions(enabledDeviceExtensions)
-        , m_pipelineWrapper(context.getInstanceInterface(), getDeviceInterface(), m_physicalDevice, getDevice(),
+        , m_pipelineWrapper(getInstanceInterface(), getDeviceInterface(), m_physicalDevice, getDevice(),
                             m_enabledDeviceExtensions, m_pipelineConstructionType, 0u)
         , m_vertShaderModule(getDeviceInterface(), getDevice(), m_context.getBinaryCollection().get("vert"))
         , m_fragShaderModule(getDeviceInterface(), getDevice(), m_context.getBinaryCollection().get("frag"))
     {
+        // If robustness2 is enabled we expect a custom device to be supplied
+        DE_ASSERT(!robustness2 || m_device);
     }
     virtual ~BindVertexBuffers2Instance(void) = default;
 
@@ -630,6 +939,7 @@ public:
 protected:
     typedef std::vector<vk::VkDeviceSize> Sizes;
     typedef std::vector<de::SharedPtr<vk::BufferWithMemory>> Buffers;
+    const vk::InstanceInterface &getInstanceInterface() const;
     const vk::DeviceInterface &getDeviceInterface() const;
     vk::VkDevice getDevice() const;
     vk::VkQueue getQueue() const;
@@ -641,24 +951,28 @@ private:
     const vk::PipelineConstructionType m_pipelineConstructionType;
     const TestParamsMaint5 m_params;
     const bool m_robustness2;
-    DeviceDriverPtr m_deviceDriver;
-    DevicePtr m_device;
+    const InstanceWrapper m_instance;
+    const DeviceWrapper m_device;
     const vk::VkPhysicalDevice m_physicalDevice;
-    vk::SimpleAllocator m_allocator;
     const std::vector<std::string> m_enabledDeviceExtensions;
     vk::GraphicsPipelineWrapper m_pipelineWrapper;
     const vk::ShaderWrapper m_vertShaderModule;
     const vk::ShaderWrapper m_fragShaderModule;
 };
 
+const vk::InstanceInterface &BindVertexBuffers2Instance::getInstanceInterface() const
+{
+    return m_device.getInstanceDriver();
+}
+
 const vk::DeviceInterface &BindVertexBuffers2Instance::getDeviceInterface() const
 {
-    return m_robustness2 ? *m_deviceDriver : m_context.getDeviceInterface();
+    return m_device.getDriver();
 }
 
 vk::VkDevice BindVertexBuffers2Instance::getDevice() const
 {
-    return m_robustness2 ? *m_device : m_context.getDevice();
+    return *m_device;
 }
 
 vk::VkQueue BindVertexBuffers2Instance::getQueue() const
@@ -667,7 +981,7 @@ vk::VkQueue BindVertexBuffers2Instance::getQueue() const
     if (m_robustness2)
     {
         const uint32_t queueFamilyIndex = m_context.getUniversalQueueFamilyIndex();
-        m_deviceDriver->getDeviceQueue(getDevice(), queueFamilyIndex, 0, &queue);
+        m_device.getDriver().getDeviceQueue(getDevice(), queueFamilyIndex, 0, &queue);
     }
     else
     {
@@ -678,13 +992,13 @@ vk::VkQueue BindVertexBuffers2Instance::getQueue() const
 
 vk::Allocator &BindVertexBuffers2Instance::getAllocator()
 {
-    return m_allocator;
+    return m_device.getAllocator();
 }
 
 void BindVertexBuffers2Instance::createPipeline(const vk::PipelineLayoutWrapper &layout, vk::VkRenderPass renderPass)
 {
     vk::VkPhysicalDeviceProperties dp{};
-    m_context.getInstanceInterface().getPhysicalDeviceProperties(m_physicalDevice, &dp);
+    getInstanceInterface().getPhysicalDeviceProperties(m_physicalDevice, &dp);
 
     const std::vector<vk::VkViewport> viewports{vk::makeViewport(m_params.width, m_params.height)};
     const std::vector<vk::VkRect2D> scissors{vk::makeRect2D(m_params.width, m_params.height)};
@@ -1342,8 +1656,8 @@ void BindVertexBuffers2Case::initPrograms(vk::SourceCollections &programCollecti
 
 TestInstance *BindVertexBuffers2Case::createInstance(Context &context) const
 {
-    DevicePtr device;
-    DeviceDriverPtr driver;
+    InstanceWrapper instance(context);
+    DeviceWrapper device(context);
 
     std::vector<std::string> enabledDeviceExtensions;
     if (m_robustness2)
@@ -1392,19 +1706,7 @@ TestInstance *BindVertexBuffers2Case::createInstance(Context &context) const
         TCU_THROW(NotSupportedError, "VulkanSC does not support VK_EXT_graphics_pipeline_library");
 #endif // CTS_USES_VULKANSC
 
-        device = createRobustBufferAccessDevice(context, enabledDeviceExtensions, &features2);
-        driver =
-#ifndef CTS_USES_VULKANSC
-            DeviceDriverPtr(new vk::DeviceDriver(context.getPlatformInterface(), context.getInstance(), *device,
-                                                 context.getUsedApiVersion(),
-                                                 context.getTestContext().getCommandLine()));
-#else
-            DeviceDriverPtr(new DeviceDriverSC(context.getPlatformInterface(), context.getInstance(), *device,
-                                               context.getTestContext().getCommandLine(),
-                                               context.getResourceInterface(), context.getDeviceVulkanSC10Properties(),
-                                               context.getDeviceProperties(), context.getUsedApiVersion()),
-                            vk::DeinitDeviceDeleter(context.getResourceInterface().get(), *device));
-#endif // CTS_USES_VULKANSC
+        device = createRobustBufferAccessDevice(context, instance, enabledDeviceExtensions, &features2);
     }
     else
     {
@@ -1412,8 +1714,8 @@ TestInstance *BindVertexBuffers2Case::createInstance(Context &context) const
             enabledDeviceExtensions.push_back(ext);
     }
 
-    return (new BindVertexBuffers2Instance(context, driver, device, m_pipelineConstructionType, m_params, m_robustness2,
-                                           enabledDeviceExtensions));
+    return (new BindVertexBuffers2Instance(context, std::move(instance), std::move(device), m_pipelineConstructionType,
+                                           m_params, m_robustness2, enabledDeviceExtensions));
 }
 
 tcu::TestCaseGroup *createCmdBindVertexBuffers2Tests(tcu::TestContext &testCtx,
@@ -1515,6 +1817,24 @@ tcu::TestCaseGroup *createCmdBindBuffers2Tests(tcu::TestContext &testCtx,
             bindGroup->addChild(typeGroup.release());
         }
         cmdBindBuffers2Group->addChild(bindGroup.release());
+    }
+
+    // Only create the mismatch tests if we are using Monolithic pipelines
+    if (pipelineConstructionType == vk::PIPELINE_CONSTRUCTION_TYPE_MONOLITHIC)
+    {
+        // Subgroup for dynamic stride mismatch tests
+        de::MovePtr<tcu::TestCaseGroup> dynamicStrideGroup(new tcu::TestCaseGroup(testCtx, "dynamic_stride"));
+
+        // Add separate mismatch test case using the dedicated class
+        TestParams mismatchParams;
+        mismatchParams.colorStride  = 4u;
+        mismatchParams.vertexStride = 4u;
+        mismatchParams.colorOffset  = 0u;
+        mismatchParams.vertexOffset = 0u;
+
+        dynamicStrideGroup->addChild(new BindBuffers2MismatchCase(testCtx, "binding_stride_index_mismatch",
+                                                                  pipelineConstructionType, mismatchParams));
+        cmdBindBuffers2Group->addChild(dynamicStrideGroup.release());
     }
 
 #ifndef CTS_USES_VULKANSC

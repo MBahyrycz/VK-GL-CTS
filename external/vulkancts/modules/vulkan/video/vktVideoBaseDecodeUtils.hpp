@@ -763,7 +763,7 @@ struct NvVkDecodeFrameDataSlot
     VkCommandBuffer commandBuffer;
 };
 
-class VideoBaseDecoder final : public VkParserVideoDecodeClient
+class VideoBaseDecoder : public VkParserVideoDecodeClient
 {
     enum
     {
@@ -844,8 +844,9 @@ public:
         bool outOfOrderDecoding{};
         bool alwaysRecreateDPB{};
         bool intraOnlyDecodingNoSetupRef{};
-        size_t pictureParameterUpdateTriggerHack{0};
         bool forceDisableFilmGrain{false};
+        bool forceSbTileUnits{false};
+        bool useGeneralLayout{false};
         VkSharedBaseObj<VulkanVideoFrameBuffer> framebuffer;
     };
     explicit VideoBaseDecoder(Parameters &&params);
@@ -863,6 +864,10 @@ public:
     {
         return &m_videoCaps;
     }
+    bool usesGeneralLayout() const
+    {
+        return m_useGeneralLayout;
+    }
 
     // VkParserVideoDecodeClient callbacks
     // Returns max number of reference frames (always at least 2 for MPEG-2)
@@ -879,8 +884,8 @@ public:
     // Called for custom NAL parsing (not required)
     void UnhandledNALU(const uint8_t *pbData, size_t cbData) override;
 
-    virtual void StartVideoSequence(const VkParserDetectedVideoFormat *pVideoFormat);
-    virtual int32_t DecodePictureWithParameters(de::MovePtr<CachedDecodeParameters> &params);
+    void StartVideoSequence(const VkParserDetectedVideoFormat *pVideoFormat);
+    int32_t DecodePictureWithParameters(de::MovePtr<CachedDecodeParameters> &params);
     VkDeviceSize GetBitstreamBuffer(VkDeviceSize size, VkDeviceSize minBitstreamBufferOffsetAlignment,
                                     VkDeviceSize minBitstreamBufferSizeAlignment,
                                     const uint8_t *pInitializeBufferMemory, VkDeviceSize initializeBufferMemorySize,
@@ -971,25 +976,9 @@ public:
     VkParserDetectedVideoFormat m_videoFormat{};
 
     VkSharedBaseObj<VkParserVideoPictureParameters> m_currentPictureParameters{};
-    int m_pictureParameterUpdateCount{0};
-    // Due to the design of the NVIDIA decoder client library, there is not a clean way to reset parameter objects
-    // in between GOPs. This becomes a problem when the session object needs to change, and then the parameter
-    // objects get stored in the wrong session. This field contains a nonnegative integer, such that when it
-    // becomes equal to m_pictureParameterUpdateCount, it will forcibly reset the current picture parameters.
-    // This could be more general by taking a modulo formula, or a list of trigger numbers. But it is currently
-    // only required for the h264_resolution_change_dpb test plan, so no need for complication.
-    size_t m_resetPictureParametersFrameTriggerHack{};
-    void triggerPictureParameterSequenceCount()
-    {
-        ++m_pictureParameterUpdateCount;
-        if (m_resetPictureParametersFrameTriggerHack > 0 &&
-            m_pictureParameterUpdateCount == m_resetPictureParametersFrameTriggerHack)
-        {
-            m_currentPictureParameters = nullptr;
-        }
-    }
 
     bool m_forceDisableFilmGrain{false};
+    bool m_forceSbTileUnits{false};
     bool m_queryResultWithStatus{false};
     bool m_useInlineQueries{false};
     bool m_useInlineSessionParams{false};
@@ -998,6 +987,7 @@ public:
     bool m_outOfOrderDecoding{false};
     bool m_alwaysRecreateDPB{false};
     bool m_intraOnlyDecodingNoSetupRef{false};
+    bool m_useGeneralLayout{false};
     vector<VkParserPerFrameDecodeParameters *> m_pPerFrameDecodeParameters;
     vector<VkParserDecodePictureInfo *> m_pVulkanParserDecodePictureInfo;
     vector<NvVkDecodeFrameData *> m_pFrameDatas;
@@ -1064,7 +1054,8 @@ public:
 };
 
 shared_ptr<VideoBaseDecoder> createBasicDecoder(DeviceContext *deviceContext, const VkVideoCoreProfile *profile,
-                                                size_t framesToCheck, bool resolutionChange);
+                                                size_t framesToCheck, bool resolutionChange,
+                                                bool useGeneralLayout = false);
 de::MovePtr<vkt::ycbcr::MultiPlaneImageData> getDecodedImageFromContext(DeviceContext &deviceContext,
                                                                         VkImageLayout layout,
                                                                         const DecodedFrame *frame);

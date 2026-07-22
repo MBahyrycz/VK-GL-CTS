@@ -36,6 +36,21 @@
 #include <algorithm>
 #include <memory>
 
+#undef ENABLE_DMA_HEAP_ALLOCATOR
+#if (DE_OS == DE_OS_ANDROID) || defined(__linux) || defined(__linux__)
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#define ENABLE_DMA_HEAP_ALLOCATOR 1
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/dma-heap.h>
+#endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+#endif // (DE_OS == DE_OS_ANDROID) || defined(__linux) || defined(__linux__)
+
 namespace vk
 {
 
@@ -235,6 +250,41 @@ MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryAllocateInfo &allocI
     return MovePtr<Allocation>(new SimpleAllocation(mem, hostPtr, static_cast<size_t>(offset)));
 }
 
+namespace
+{
+
+std::unique_ptr<VkMemoryAllocateFlagsInfo> getMemoryAllocateFlagsInfo(MemoryRequirement requirement)
+{
+    VkMemoryAllocateFlags flags = 0u;
+
+    if (requirement & MemoryRequirement::DeviceAddress)
+        flags |= VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+    if (requirement & MemoryRequirement::DeviceAddressCaptureReplay)
+        flags |= VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
+
+#ifndef CTS_USES_VULKANSC
+    if (requirement & MemoryRequirement::ZeroInitialize)
+        flags |= VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT;
+#endif // CTS_USES_VULKANSC
+
+    std::unique_ptr<VkMemoryAllocateFlagsInfo> flagsInfo;
+
+    if (flags)
+    {
+        flagsInfo.reset(new VkMemoryAllocateFlagsInfo{
+            VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, // VkStructureType       sType
+            nullptr,                                      // const void*           pNext
+            flags,                                        // VkMemoryAllocateFlags flags
+            0u,                                           // uint32_t              deviceMask
+        });
+    }
+
+    return flagsInfo;
+}
+
+} // namespace
+
 MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryRequirements &memReqs, MemoryRequirement requirement,
                                               const tcu::Maybe<HostIntent> &hostIntent,
                                               uint64_t memoryOpaqueCaptureAddr)
@@ -259,12 +309,7 @@ MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryRequirements &memReq
         memoryTypeNdx,                          // uint32_t memoryTypeIndex;
     };
 
-    VkMemoryAllocateFlagsInfo allocFlagsInfo = {
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, //    VkStructureType            sType
-        nullptr,                                      //    const void*                pNext
-        0,                                            //    VkMemoryAllocateFlags    flags
-        0,                                            //    uint32_t                deviceMask
-    };
+    auto allocFlagsInfo = getMemoryAllocateFlagsInfo(requirement);
 
     VkMemoryOpaqueCaptureAddressAllocateInfo captureInfo = {
         VK_STRUCTURE_TYPE_MEMORY_OPAQUE_CAPTURE_ADDRESS_ALLOCATE_INFO, // VkStructureType sType
@@ -272,24 +317,11 @@ MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryRequirements &memReq
         memoryOpaqueCaptureAddr,                                       // uint64_t        opaqueCaptureAddress
     };
 
-    if (requirement & MemoryRequirement::DeviceAddress)
-        allocFlagsInfo.flags |= VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    if (memoryOpaqueCaptureAddr && allocFlagsInfo)
+        allocFlagsInfo->pNext = &captureInfo;
 
-    if (requirement & MemoryRequirement::DeviceAddressCaptureReplay)
-    {
-        allocFlagsInfo.flags |= VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT;
-
-        if (memoryOpaqueCaptureAddr)
-            allocFlagsInfo.pNext = &captureInfo;
-    }
-
-#ifndef CTS_USES_VULKANSC
-    if (requirement & MemoryRequirement::ZeroInitialize)
-        allocFlagsInfo.flags |= VK_MEMORY_ALLOCATE_ZERO_INITIALIZE_BIT_EXT;
-#endif // CTS_USES_VULKANSC
-
-    if (allocFlagsInfo.flags)
-        allocInfo.pNext = &allocFlagsInfo;
+    if (allocFlagsInfo)
+        allocInfo.pNext = allocFlagsInfo.get();
 
     Move<VkDeviceMemory> mem = allocateMemory(m_vk, m_device, &allocInfo);
     MovePtr<HostPtr> hostPtr;
@@ -314,7 +346,7 @@ MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryRequirements &memReq
 }
 
 MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryRequirements &memReqs, HostIntent intent,
-                                              VkMemoryAllocateFlags allocFlags)
+                                              VkMemoryAllocateFlags allocFlags, uint64_t memoryOpaqueCaptureAddr)
 {
     const bool devAddrCR = (allocFlags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_CAPTURE_REPLAY_BIT);
     const bool devAddr   = (allocFlags & VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT);
@@ -334,8 +366,260 @@ MovePtr<Allocation> SimpleAllocator::allocate(const VkMemoryRequirements &memReq
                               | ziReq
 #endif // CTS_USES_VULKANSC
     );
-    return SimpleAllocator::allocate(memReqs, requirement, tcu::just(intent));
+    return SimpleAllocator::allocate(memReqs, requirement, tcu::just(intent), memoryOpaqueCaptureAddr);
 }
+
+#if ENABLE_DMA_HEAP_ALLOCATOR
+
+namespace
+{
+
+class DmaHeapBufferFd
+{
+public:
+    explicit DmaHeapBufferFd(const int fd) : m_fd(fd)
+    {
+    }
+
+    ~DmaHeapBufferFd()
+    {
+        reset();
+    }
+
+    DmaHeapBufferFd(const DmaHeapBufferFd &)            = delete;
+    DmaHeapBufferFd &operator=(const DmaHeapBufferFd &) = delete;
+
+    DmaHeapBufferFd(DmaHeapBufferFd &&other) : m_fd(other.m_fd)
+    {
+        other.m_fd = -1;
+    }
+
+    DmaHeapBufferFd &operator=(DmaHeapBufferFd &&other)
+    {
+        this->reset(other.release());
+        return *this;
+    }
+
+    int operator*()
+    {
+        return m_fd;
+    }
+
+    /* Release ownership of held file descriptor */
+    int release()
+    {
+        const int returned_fd = m_fd;
+        m_fd                  = -1;
+
+        return returned_fd;
+    }
+
+    /* Close held file descriptor and optionally take ownership of new one */
+    void reset(const int fd = -1)
+    {
+        if (m_fd >= 0)
+        {
+            const int result = ::close(m_fd);
+            DE_UNREF(result);
+            DE_ASSERT(result == 0);
+        }
+
+        DE_ASSERT(fd >= -1);
+
+        m_fd = fd;
+    }
+
+private:
+    int m_fd;
+};
+
+static DmaHeapBufferFd allocateDmaHeapBuffer(const uint64_t size)
+{
+    // Open the system DMA heap device
+    const int dmaHeapFd = ::open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
+    if (dmaHeapFd == -1)
+    {
+        TCU_THROW(NotSupportedError, "Could not open DMA heap device");
+    }
+
+    dma_heap_allocation_data dmaHeapAllocData{};
+    dmaHeapAllocData.len      = size;
+    dmaHeapAllocData.fd_flags = O_RDWR | O_CLOEXEC;
+
+    // Issue ioctl to allocate the DMA buffer from the heap device
+    const int allocResult = ::ioctl(dmaHeapFd, DMA_HEAP_IOCTL_ALLOC, &dmaHeapAllocData);
+
+    ::close(dmaHeapFd);
+
+    if (allocResult != 0)
+    {
+        TCU_THROW(NotSupportedError, "Error while allocating DMA heap memory");
+    }
+
+    return DmaHeapBufferFd(dmaHeapAllocData.fd);
+}
+
+} // namespace
+
+DmaHeapAllocator::DmaHeapAllocator(const DeviceInterface &vk, VkDevice device,
+                                   const VkPhysicalDeviceMemoryProperties &deviceMemProps,
+                                   const OptionalOffsetParams &offsetParams)
+    : m_vk(vk)
+    , m_device(device)
+    , m_memProps(deviceMemProps)
+    , m_offsetParams(offsetParams)
+{
+    if (m_offsetParams)
+    {
+        const auto zero = VkDeviceSize{0};
+        DE_UNREF(zero); // For release builds.
+        // If an offset is provided, a non-coherent atom size must be provided too.
+        DE_ASSERT(m_offsetParams->offset == zero || m_offsetParams->nonCoherentAtomSize != zero);
+    }
+}
+
+bool DmaHeapAllocator::isSupported()
+{
+    return true;
+}
+
+MovePtr<Allocation> DmaHeapAllocator::allocate(const VkMemoryAllocateInfo &allocInfo, VkDeviceSize alignment)
+{
+    DE_UNREF(allocInfo);
+    DE_UNREF(alignment);
+
+    // VkMemoryAllocateInfo-based allocation not supported
+    DE_ASSERT(false);
+    return {};
+}
+
+MovePtr<Allocation> DmaHeapAllocator::allocate(const VkMemoryRequirements &memReqs, HostIntent intent,
+                                               VkMemoryAllocateFlags allocFlags, uint64_t memoryOpaqueCaptureAddr)
+{
+    DE_UNREF(memReqs);
+    DE_UNREF(intent);
+    DE_UNREF(allocFlags);
+    DE_UNREF(memoryOpaqueCaptureAddr);
+
+    // Intent-based allocation not supported
+    DE_ASSERT(false);
+    return {};
+}
+
+MovePtr<Allocation> DmaHeapAllocator::allocate(const VkMemoryRequirements &memReqs, MemoryRequirement requirement,
+                                               uint64_t memoryOpaqueCaptureAddr)
+{
+    DE_UNREF(memoryOpaqueCaptureAddr);
+
+    // Align the offset to the requirements.
+    // Aligning to the non coherent atom size prevents flush and memory invalidation valid usage errors.
+    const auto requiredAlignment =
+        (m_offsetParams ? de::lcm(m_offsetParams->nonCoherentAtomSize, memReqs.alignment) : memReqs.alignment);
+    const auto offset = (m_offsetParams ? de::roundUp(m_offsetParams->offset, requiredAlignment) : 0);
+
+    const VkDeviceSize allocationSize = memReqs.size + offset;
+
+    // Allocate the DMA heap memory of the requested size
+    DmaHeapBufferFd dmaBufFd(allocateDmaHeapBuffer(allocationSize));
+
+    // Attempt to find a memory type that is compatible with the memory requirements object, the requested memory requirement and the DMA buffer heap allocation
+    VkMemoryFdPropertiesKHR memoryFdProperties{};
+    memoryFdProperties.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+
+    const VkResult properties_result = m_vk.getMemoryFdPropertiesKHR(
+        m_device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, *dmaBufFd, &memoryFdProperties);
+    VK_CHECK(properties_result);
+
+    const uint32_t dmaBufCompatibleTypes          = memoryFdProperties.memoryTypeBits;
+    const uint32_t testRequirementCompatibleTypes = getCompatibleMemoryTypes(m_memProps, requirement);
+    const uint32_t requirementsCompatibleTypes    = memReqs.memoryTypeBits;
+
+    const uint32_t memoryTypeCandidates =
+        dmaBufCompatibleTypes & testRequirementCompatibleTypes & requirementsCompatibleTypes;
+
+    if (memoryTypeCandidates == 0)
+    {
+        TCU_THROW(NotSupportedError,
+                  "Could not find any memory type compatible with both requested memory and DMA heap memory");
+    }
+
+    const uint32_t chosenMemoryType = static_cast<uint32_t>(deCtz32(memoryTypeCandidates));
+
+    // Import the DMA heap allocation into a Vulkan memory object
+    const VkImportMemoryFdInfoKHR fd_import_info = {VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, nullptr,
+                                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, *dmaBufFd};
+
+    const VkMemoryAllocateInfo info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &fd_import_info, allocationSize,
+                                       chosenMemoryType};
+
+    Move<VkDeviceMemory> mem = allocateMemory(m_vk, m_device, &info);
+
+    // Successful memory allocation has taken ownership of the file descriptor
+    dmaBufFd.release();
+
+    MovePtr<HostPtr> hostPtr;
+
+    if (isHostVisibleMemory(m_memProps, info.memoryTypeIndex))
+        hostPtr = MovePtr<HostPtr>(new HostPtr(m_vk, m_device, *mem, offset, memReqs.size, 0u));
+
+    return MovePtr<Allocation>(new SimpleAllocation(mem, hostPtr, static_cast<size_t>(offset)));
+}
+
+#else
+
+DmaHeapAllocator::DmaHeapAllocator(const DeviceInterface &vk, VkDevice device,
+                                   const VkPhysicalDeviceMemoryProperties &deviceMemProps,
+                                   const OptionalOffsetParams &offsetParams)
+    : m_vk(vk)
+    , m_device(device)
+    , m_memProps(deviceMemProps)
+    , m_offsetParams(offsetParams)
+{
+    // DMA heap allocation is not supported
+    DE_ASSERT(false);
+}
+
+bool DmaHeapAllocator::isSupported()
+{
+    return false;
+}
+
+MovePtr<Allocation> DmaHeapAllocator::allocate(const VkMemoryAllocateInfo &allocInfo, VkDeviceSize alignment)
+{
+    DE_UNREF(allocInfo);
+    DE_UNREF(alignment);
+
+    // DMA heap allocation are not supported
+    DE_ASSERT(false);
+    return {};
+}
+
+MovePtr<Allocation> DmaHeapAllocator::allocate(const VkMemoryRequirements &memReqs, HostIntent intent,
+                                               VkMemoryAllocateFlags allocFlags, uint64_t memoryOpaqueCaptureAddr)
+{
+    DE_UNREF(memReqs);
+    DE_UNREF(intent);
+    DE_UNREF(allocFlags);
+    DE_UNREF(memoryOpaqueCaptureAddr);
+
+    // DMA heap allocation are not supported
+    DE_ASSERT(false);
+    return {};
+}
+
+MovePtr<Allocation> DmaHeapAllocator::allocate(const VkMemoryRequirements &memReqs, MemoryRequirement requirement,
+                                               uint64_t memoryOpaqueCaptureAddr)
+{
+    DE_UNREF(memReqs);
+    DE_UNREF(requirement);
+    DE_UNREF(memoryOpaqueCaptureAddr);
+
+    // DMA heap allocation are not supported
+    DE_ASSERT(false);
+    return {};
+}
+
+#endif // ENABLE_DMA_HEAP_ALLOCATOR
 
 MovePtr<Allocation> allocateExtended(const InstanceInterface &vki, const DeviceInterface &vkd,
                                      const VkPhysicalDevice &physDevice, const VkDevice device,
@@ -344,7 +628,7 @@ MovePtr<Allocation> allocateExtended(const InstanceInterface &vki, const DeviceI
 {
     const VkPhysicalDeviceMemoryProperties memoryProperties = getPhysicalDeviceMemoryProperties(vki, physDevice);
     const uint32_t memoryTypeNdx = selectMatchingMemoryType(memoryProperties, memReqs.memoryTypeBits, requirement);
-    const VkMemoryAllocateInfo allocInfo = {
+    const VkMemoryAllocateInfo allocInfo{
         VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, //    VkStructureType    sType
         pNext,                                  //    const void*        pNext
         memReqs.size,                           //    VkDeviceSize    allocationSize
@@ -366,13 +650,17 @@ de::MovePtr<Allocation> allocateDedicated(const InstanceInterface &vki, const De
                                           const VkPhysicalDevice &physDevice, const VkDevice device,
                                           const VkBuffer buffer, MemoryRequirement requirement)
 {
-    const VkMemoryRequirements memoryRequirements               = getBufferMemoryRequirements(vkd, device, buffer);
-    const VkMemoryDedicatedAllocateInfo dedicatedAllocationInfo = {
+    const VkMemoryRequirements memoryRequirements         = getBufferMemoryRequirements(vkd, device, buffer);
+    VkMemoryDedicatedAllocateInfo dedicatedAllocationInfo = {
         VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, // VkStructureType        sType
         nullptr,                                          // const void*            pNext
         VK_NULL_HANDLE,                                   // VkImage                image
         buffer                                            // VkBuffer                buffer
     };
+
+    const auto flagsInfo = getMemoryAllocateFlagsInfo(requirement);
+    if (flagsInfo)
+        dedicatedAllocationInfo.pNext = flagsInfo.get();
 
     return allocateExtended(vki, vkd, physDevice, device, memoryRequirements, requirement, &dedicatedAllocationInfo);
 }
@@ -381,13 +669,17 @@ de::MovePtr<Allocation> allocateDedicated(const InstanceInterface &vki, const De
                                           const VkPhysicalDevice &physDevice, const VkDevice device,
                                           const VkImage image, MemoryRequirement requirement)
 {
-    const VkMemoryRequirements memoryRequirements               = getImageMemoryRequirements(vkd, device, image);
-    const VkMemoryDedicatedAllocateInfo dedicatedAllocationInfo = {
+    const VkMemoryRequirements memoryRequirements         = getImageMemoryRequirements(vkd, device, image);
+    VkMemoryDedicatedAllocateInfo dedicatedAllocationInfo = {
         VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, // VkStructureType        sType
         nullptr,                                          // const void*            pNext
         image,                                            // VkImage                image
         VK_NULL_HANDLE                                    // VkBuffer                buffer
     };
+
+    const auto flagsInfo = getMemoryAllocateFlagsInfo(requirement);
+    if (flagsInfo)
+        dedicatedAllocationInfo.pNext = flagsInfo.get();
 
     return allocateExtended(vki, vkd, physDevice, device, memoryRequirements, requirement, &dedicatedAllocationInfo);
 }

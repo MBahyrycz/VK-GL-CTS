@@ -36,6 +36,9 @@
 #include "deUniquePtr.hpp"
 #include "deRandom.hpp"
 
+#include "tcuStringTemplate.hpp"
+
+#include <map>
 #include <sstream>
 #include <vector>
 #include <iostream>
@@ -57,18 +60,24 @@ enum TestFlagBits
     TEST_FLAG_BIT_DISABLE_OPACITY_MICROMAP_INSTANCE = 1U << 2,
     TEST_FLAG_BIT_FORCE_2_STATE_INSTANCE            = 1U << 3,
     TEST_FLAG_BIT_FORCE_2_STATE_RAY_FLAG            = 1U << 4,
-    TEST_FLAG_BIT_LAST                              = 1U << 5,
+    TEST_FLAG_BIT_FORCE_NO_OPAQUE_INSTANCE          = 1U << 5,
+    TEST_FLAG_BIT_NO_OPAQUE_RAY_FLAG                = 1U << 6,
+    TEST_FLAG_BIT_CULL_OPAQUE_RAY_FLAG              = 1U << 7,
+    TEST_FLAG_BIT_CULL_NO_OPAQUE_RAY_FLAG           = 1U << 8,
+    TEST_FLAG_BIT_LAST                              = 1U << 9,
 };
 
 std::vector<std::string> testFlagBitNames = {
     "force_opaque_instance",  "force_opaque_ray_flag",  "disable_opacity_micromap_instance",
-    "force_2_state_instance", "force_2_state_ray_flag",
+    "force_2_state_instance", "force_2_state_ray_flag", "force_no_opaque_instance",
+    "no_opaque_ray_flag",     "cull_opaque_ray_flag",   "cull_no_opaque_ray_flag",
 };
 
 struct TestParams
 {
     bool useSpecialIndex;
     bool nonZeroBase;
+    bool nullMicromapHandle;
     uint32_t testFlagMask;
     uint32_t subdivisionLevel; // Must be 0 for useSpecialIndex
     uint32_t mode;             // Special index value if useSpecialIndex, 2 or 4 for number of states otherwise
@@ -171,11 +180,22 @@ void OpacityMicromapCase::initPrograms(vk::SourceCollections &programCollection)
                 << "} modes;\n";
     const auto layoutDeclsStr = layoutDecls.str();
 
-    std::string flagsString =
-        (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_RAY_FLAG) ? "gl_RayFlagsOpaqueEXT" : "gl_RayFlagsNoneEXT";
+    std::string flagsString = "gl_RayFlagsNoneEXT";
+
+    if (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_RAY_FLAG)
+        flagsString += " | gl_RayFlagsOpaqueEXT";
+
+    if (m_params.testFlagMask & TEST_FLAG_BIT_NO_OPAQUE_RAY_FLAG)
+        flagsString += " | gl_RayFlagsNoOpaqueEXT";
 
     if (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_2_STATE_RAY_FLAG)
         flagsString += " | gl_RayFlagsForceOpacityMicromap2StateEXT";
+
+    if (m_params.testFlagMask & TEST_FLAG_BIT_CULL_OPAQUE_RAY_FLAG)
+        flagsString += " | gl_RayFlagsCullOpaqueEXT";
+
+    if (m_params.testFlagMask & TEST_FLAG_BIT_CULL_NO_OPAQUE_RAY_FLAG)
+        flagsString += " | gl_RayFlagsCullNoOpaqueEXT";
 
     std::ostringstream rgen;
     rgen << "#version 460 core\n"
@@ -396,87 +416,98 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
         *((uint32_t *)&data[IndexOffset]) = m_params.useSpecialIndex ? m_params.mode : 0;
     }
 
-    // Query the size from the build info
-    VkMicromapBuildInfoEXT mmBuildInfo = {
-        VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT,                // VkStructureType sType;
-        nullptr,                                                  // const void* pNext;
-        VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT,                    // VkMicromapTypeEXT type;
-        0,                                                        // VkBuildMicromapFlagsEXT flags;
-        VK_BUILD_MICROMAP_MODE_BUILD_EXT,                         // VkBuildMicromapModeEXT mode;
-        VK_NULL_HANDLE,                                           // VkMicromapEXT dstMicromap;
-        1,                                                        // uint32_t usageCountsCount;
-        &mmUsage,                                                 // const VkMicromapUsageEXT* pUsageCounts;
-        nullptr,                                                  // const VkMicromapUsageEXT* const* ppUsageCounts;
-        makeDeviceOrHostAddressConstKHR(nullptr),                 // VkDeviceOrHostAddressConstKHR data;
-        makeDeviceOrHostAddressKHR(nullptr),                      // VkDeviceOrHostAddressKHR scratchData;
-        makeDeviceOrHostAddressConstKHR(nullptr),                 // VkDeviceOrHostAddressConstKHR triangleArray;
-        static_cast<VkDeviceSize>(sizeof(VkMicromapTriangleEXT)), // VkDeviceSize triangleArrayStride;
-    };
+    Move<VkMicromapEXT> micromap;
+    de::MovePtr<BufferWithMemory> micromapBackingBufferPtr;
+    de::MovePtr<BufferWithMemory> micromapScratchBufferPtr;
 
-    VkMicromapBuildSizesInfoEXT sizeInfo = {
-        VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT, // VkStructureType sType;
-        nullptr,                                         // const void* pNext;
-        0,                                               // VkDeviceSize micromapSize;
-        0,                                               // VkDeviceSize buildScratchSize;
-        false,                                           // VkBool32 discardable;
-    };
-
-    vkd.getMicromapBuildSizesEXT(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &mmBuildInfo, &sizeInfo);
-
-    // Create the backing and scratch storage
-    const auto micromapBackingBufferCreateInfo = makeBufferCreateInfo(
-        sizeInfo.micromapSize, VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    BufferWithMemory micromapBackingBuffer(vkd, device, alloc, micromapBackingBufferCreateInfo,
-                                           MemoryRequirement::Local | MemoryRequirement::DeviceAddress);
-
-    const auto micromapScratchBufferCreateInfo =
-        makeBufferCreateInfo(sizeInfo.buildScratchSize,
-                             VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    BufferWithMemory micromapScratchBuffer(vkd, device, alloc, micromapScratchBufferCreateInfo,
-                                           MemoryRequirement::Local | MemoryRequirement::DeviceAddress);
-
-    // Create the micromap itself
-    VkMicromapCreateInfoEXT maCreateInfo = {
-        VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT, // VkStructureType sType;
-        nullptr,                                    // const void* pNext;
-        0,                                          // VkMicromapCreateFlagsEXT createFlags;
-        micromapBackingBuffer.get(),                // VkBuffer buffer;
-        0,                                          // VkDeviceSize offset;
-        sizeInfo.micromapSize,                      // VkDeviceSize size;
-        VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT,      // VkMicromapTypeEXT type;
-        0ull                                        // VkDeviceAddress deviceAddress;
-    };
-
-    Move<VkMicromapEXT> micromap = vk::createMicromapEXT(vkd, device, &maCreateInfo);
-
-    // Do the build
-    mmBuildInfo.dstMicromap   = *micromap;
-    mmBuildInfo.data          = makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(), DataOffset);
-    mmBuildInfo.triangleArray = makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(), TriangleOffset);
-    mmBuildInfo.scratchData   = makeDeviceOrHostAddressKHR(vkd, device, micromapScratchBuffer.get(), 0);
-
-    vkd.cmdBuildMicromapsEXT(cmdBuffer, 1, &mmBuildInfo);
-
+    if (!m_params.nullMicromapHandle)
     {
-        VkMemoryBarrier2 memoryBarrier     = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-                                              NULL,
-                                              VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
-                                              VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT,
-                                              VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                                              VK_ACCESS_2_MICROMAP_READ_BIT_EXT};
-        VkDependencyInfoKHR dependencyInfo = {
-            VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR, // VkStructureType sType;
-            nullptr,                               // const void* pNext;
-            0u,                                    // VkDependencyFlags dependencyFlags;
-            1u,                                    // uint32_t memoryBarrierCount;
-            &memoryBarrier,                        // const VkMemoryBarrier2KHR* pMemoryBarriers;
-            0u,                                    // uint32_t bufferMemoryBarrierCount;
-            nullptr,                               // const VkBufferMemoryBarrier2KHR* pBufferMemoryBarriers;
-            0u,                                    // uint32_t imageMemoryBarrierCount;
-            nullptr,                               // const VkImageMemoryBarrier2KHR* pImageMemoryBarriers;
+        // Query the size from the build info
+        VkMicromapBuildInfoEXT mmBuildInfo = {
+            VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT,                // VkStructureType sType;
+            nullptr,                                                  // const void* pNext;
+            VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT,                    // VkMicromapTypeEXT type;
+            0,                                                        // VkBuildMicromapFlagsEXT flags;
+            VK_BUILD_MICROMAP_MODE_BUILD_EXT,                         // VkBuildMicromapModeEXT mode;
+            VK_NULL_HANDLE,                                           // VkMicromapEXT dstMicromap;
+            1,                                                        // uint32_t usageCountsCount;
+            &mmUsage,                                                 // const VkMicromapUsageEXT* pUsageCounts;
+            nullptr,                                                  // const VkMicromapUsageEXT* const* ppUsageCounts;
+            makeDeviceOrHostAddressConstKHR(nullptr),                 // VkDeviceOrHostAddressConstKHR data;
+            makeDeviceOrHostAddressKHR(nullptr),                      // VkDeviceOrHostAddressKHR scratchData;
+            makeDeviceOrHostAddressConstKHR(nullptr),                 // VkDeviceOrHostAddressConstKHR triangleArray;
+            static_cast<VkDeviceSize>(sizeof(VkMicromapTriangleEXT)), // VkDeviceSize triangleArrayStride;
         };
 
-        vkd.cmdPipelineBarrier2(cmdBuffer, &dependencyInfo);
+        VkMicromapBuildSizesInfoEXT sizeInfo = {
+            VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT, // VkStructureType sType;
+            nullptr,                                         // const void* pNext;
+            0,                                               // VkDeviceSize micromapSize;
+            0,                                               // VkDeviceSize buildScratchSize;
+            false,                                           // VkBool32 discardable;
+        };
+
+        vkd.getMicromapBuildSizesEXT(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &mmBuildInfo, &sizeInfo);
+
+        // Create the backing and scratch storage
+        const auto micromapBackingBufferCreateInfo =
+            makeBufferCreateInfo(sizeInfo.micromapSize,
+                                 VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        micromapBackingBufferPtr = de::MovePtr<BufferWithMemory>(
+            new BufferWithMemory(vkd, device, alloc, micromapBackingBufferCreateInfo,
+                                 MemoryRequirement::Local | MemoryRequirement::DeviceAddress));
+
+        const auto micromapScratchBufferCreateInfo =
+            makeBufferCreateInfo(sizeInfo.buildScratchSize,
+                                 VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        micromapScratchBufferPtr = de::MovePtr<BufferWithMemory>(
+            new BufferWithMemory(vkd, device, alloc, micromapScratchBufferCreateInfo,
+                                 MemoryRequirement::Local | MemoryRequirement::DeviceAddress));
+
+        // Create the micromap itself
+        VkMicromapCreateInfoEXT maCreateInfo = {
+            VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT, // VkStructureType sType;
+            nullptr,                                    // const void* pNext;
+            0,                                          // VkMicromapCreateFlagsEXT createFlags;
+            micromapBackingBufferPtr->get(),            // VkBuffer buffer;
+            0,                                          // VkDeviceSize offset;
+            sizeInfo.micromapSize,                      // VkDeviceSize size;
+            VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT,      // VkMicromapTypeEXT type;
+            0ull                                        // VkDeviceAddress deviceAddress;
+        };
+
+        micromap = vk::createMicromapEXT(vkd, device, &maCreateInfo);
+
+        // Do the build
+        mmBuildInfo.dstMicromap = *micromap;
+        mmBuildInfo.data        = makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(), DataOffset);
+        mmBuildInfo.triangleArray =
+            makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(), TriangleOffset);
+        mmBuildInfo.scratchData = makeDeviceOrHostAddressKHR(vkd, device, micromapScratchBufferPtr->get(), 0);
+
+        vkd.cmdBuildMicromapsEXT(cmdBuffer, 1, &mmBuildInfo);
+
+        {
+            VkMemoryBarrier2 memoryBarrier     = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                                                  NULL,
+                                                  VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
+                                                  VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT,
+                                                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                                  VK_ACCESS_2_MICROMAP_READ_BIT_EXT};
+            VkDependencyInfoKHR dependencyInfo = {
+                VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR, // VkStructureType sType;
+                nullptr,                               // const void* pNext;
+                0u,                                    // VkDependencyFlags dependencyFlags;
+                1u,                                    // uint32_t memoryBarrierCount;
+                &memoryBarrier,                        // const VkMemoryBarrier2KHR* pMemoryBarriers;
+                0u,                                    // uint32_t bufferMemoryBarrierCount;
+                nullptr,                               // const VkBufferMemoryBarrier2KHR* pBufferMemoryBarriers;
+                0u,                                    // uint32_t imageMemoryBarrierCount;
+                nullptr,                               // const VkImageMemoryBarrier2KHR* pImageMemoryBarriers;
+            };
+
+            vkd.cmdPipelineBarrier2(cmdBuffer, &dependencyInfo);
+        }
     }
 
     // Attach the micromap to the geometry
@@ -485,13 +516,13 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
         nullptr,                                                                 //void* pNext;
         VK_INDEX_TYPE_UINT32,                                                    //VkIndexType indexType;
         makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(),
-                                        IndexOffset), //VkDeviceOrHostAddressConstKHR indexBuffer;
-        0u,                                           //VkDeviceSize indexStride;
-        (m_params.nonZeroBase ? 1u : 0u),             //uint32_t baseTriangle;
-        1u,                                           //uint32_t usageCountsCount;
-        &mmUsage,                                     //const VkMicromapUsageEXT* pUsageCounts;
-        nullptr,                                      //const VkMicromapUsageEXT* const* ppUsageCounts;
-        *micromap                                     //VkMicromapEXT micromap;
+                                        IndexOffset),     //VkDeviceOrHostAddressConstKHR indexBuffer;
+        0u,                                               //VkDeviceSize indexStride;
+        (m_params.nonZeroBase ? 1u : 0u),                 //uint32_t baseTriangle;
+        m_params.nullMicromapHandle ? 0u : 1u,            //uint32_t usageCountsCount;
+        m_params.nullMicromapHandle ? nullptr : &mmUsage, //const VkMicromapUsageEXT* pUsageCounts;
+        nullptr,                                          //const VkMicromapUsageEXT* const* ppUsageCounts;
+        *micromap                                         //VkMicromapEXT micromap;
     };
 
     const std::vector<tcu::Vec3> triangle = {
@@ -503,7 +534,7 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
     AccelerationStructBufferProperties bufferProps;
     bufferProps.props.residency = ResourceResidency::TRADITIONAL;
 
-    bottomLevelAS->addGeometry(triangle, true /*is triangles*/, 0, &opacityGeometryMicromap);
+    bottomLevelAS->addGeometry(triangle, true /*is triangles*/, 0 /*flags*/, &opacityGeometryMicromap);
     if (m_params.testFlagMask & TEST_FLAG_BIT_DISABLE_OPACITY_MICROMAP_INSTANCE)
         bottomLevelAS->setBuildFlags(VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DISABLE_OPACITY_MICROMAPS_EXT);
     bottomLevelAS->createAndBuild(vkd, device, cmdBuffer, alloc, bufferProps);
@@ -515,6 +546,8 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
         instanceFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPACITY_MICROMAP_2_STATE_EXT;
     if (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_INSTANCE)
         instanceFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+    if (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_NO_OPAQUE_INSTANCE)
+        instanceFlags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
     if (m_params.testFlagMask & TEST_FLAG_BIT_DISABLE_OPACITY_MICROMAP_INSTANCE)
         instanceFlags |= VK_GEOMETRY_INSTANCE_DISABLE_OPACITY_MICROMAPS_EXT;
 
@@ -542,10 +575,7 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
     // Fill in vector of expected outputs
     for (uint32_t index = 0; index < numRays; index++)
     {
-        uint32_t state =
-            m_params.testFlagMask & (TEST_FLAG_BIT_FORCE_OPAQUE_INSTANCE | TEST_FLAG_BIT_FORCE_OPAQUE_RAY_FLAG) ?
-                VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT :
-                VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT;
+        uint32_t state = uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT);
 
         if (!(m_params.testFlagMask & TEST_FLAG_BIT_DISABLE_OPACITY_MICROMAP_INSTANCE))
         {
@@ -579,19 +609,45 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
             }
         }
 
+        const bool forceOpaqueRay        = (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_RAY_FLAG) != 0;
+        const bool noOpaqueRay           = (m_params.testFlagMask & TEST_FLAG_BIT_NO_OPAQUE_RAY_FLAG) != 0;
+        const bool forceOpaqueInstance   = (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_INSTANCE) != 0;
+        const bool forceNoOpaqueInstance = (m_params.testFlagMask & TEST_FLAG_BIT_FORCE_NO_OPAQUE_INSTANCE) != 0;
+
+        bool effectiveOpaque   = false;
+        bool effectiveNoOpaque = false;
+
+        if (forceOpaqueRay)
+            effectiveOpaque = true;
+        else if (noOpaqueRay)
+            effectiveNoOpaque = true;
+        else if (forceOpaqueInstance)
+            effectiveOpaque = true;
+        else if (forceNoOpaqueInstance)
+            effectiveNoOpaque = true;
+
+        const bool cullOpaque   = (m_params.testFlagMask & TEST_FLAG_BIT_CULL_OPAQUE_RAY_FLAG) != 0;
+        const bool cullNoOpaque = (m_params.testFlagMask & TEST_FLAG_BIT_CULL_NO_OPAQUE_RAY_FLAG) != 0;
+        const bool culled =
+            (cullOpaque && !forceNoOpaqueInstance &&
+             (forceOpaqueInstance || state == uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT))) ||
+            (cullNoOpaque &&
+             (forceNoOpaqueInstance ||
+              (!forceOpaqueInstance && state != uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT))));
+
         if (state != uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_EXT))
         {
-            if (m_params.testFlagMask & (TEST_FLAG_BIT_FORCE_OPAQUE_INSTANCE | TEST_FLAG_BIT_FORCE_OPAQUE_RAY_FLAG))
+            if (effectiveOpaque)
             {
                 state = uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT);
             }
-            else if (state != uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT))
+            else if (effectiveNoOpaque || state != uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT))
             {
                 state = uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_UNKNOWN_OPAQUE_EXT);
             }
         }
 
-        if (state == uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_EXT))
+        if (culled || state == uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_EXT))
         {
             expectedOutputModes.push_back(0);
         }
@@ -770,6 +826,572 @@ tcu::TestStatus OpacityMicromapInstance::iterate(void)
     return tcu::TestStatus::pass("Pass");
 }
 
+struct ManyTrianglesParams
+{
+    uint32_t triangleCount;
+    uint32_t mode; // 2 or 4 for number of states
+    uint32_t subdivisionLevel;
+    uint32_t seed;
+};
+
+class OpacityMicromapManyTrianglesCase : public TestCase
+{
+public:
+    OpacityMicromapManyTrianglesCase(tcu::TestContext &testCtx, const std::string &name,
+                                     const ManyTrianglesParams &params);
+    virtual ~OpacityMicromapManyTrianglesCase(void)
+    {
+    }
+
+    virtual void checkSupport(Context &context) const;
+    virtual void initPrograms(vk::SourceCollections &programCollection) const;
+    virtual TestInstance *createInstance(Context &context) const;
+
+protected:
+    ManyTrianglesParams m_params;
+};
+
+class OpacityMicromapManyTrianglesInstance : public TestInstance
+{
+public:
+    OpacityMicromapManyTrianglesInstance(Context &context, const ManyTrianglesParams &params);
+    virtual ~OpacityMicromapManyTrianglesInstance(void)
+    {
+    }
+
+    virtual tcu::TestStatus iterate(void);
+
+protected:
+    ManyTrianglesParams m_params;
+};
+
+OpacityMicromapManyTrianglesCase::OpacityMicromapManyTrianglesCase(tcu::TestContext &testCtx, const std::string &name,
+                                                                   const ManyTrianglesParams &params)
+    : TestCase(testCtx, name)
+    , m_params(params)
+{
+}
+
+void OpacityMicromapManyTrianglesCase::checkSupport(Context &context) const
+{
+    context.requireDeviceFunctionality("VK_KHR_acceleration_structure");
+    context.requireDeviceFunctionality("VK_KHR_ray_tracing_pipeline");
+    context.requireDeviceFunctionality("VK_EXT_opacity_micromap");
+
+    const VkPhysicalDeviceAccelerationStructureFeaturesKHR &accelerationStructureFeaturesKHR =
+        context.getAccelerationStructureFeatures();
+    if (accelerationStructureFeaturesKHR.accelerationStructure == false)
+        TCU_THROW(TestError, "Requires VkPhysicalDeviceAccelerationStructureFeaturesKHR.accelerationStructure");
+
+    const VkPhysicalDeviceOpacityMicromapFeaturesEXT &opacityMicromapFeaturesEXT =
+        context.getOpacityMicromapFeaturesEXT();
+    if (opacityMicromapFeaturesEXT.micromap == false)
+        TCU_THROW(NotSupportedError, "Requires VkPhysicalDeviceOpacityMicromapFeaturesEXT.micromap");
+
+    const VkPhysicalDeviceOpacityMicromapPropertiesEXT &opacityMicromapPropertiesEXT =
+        context.getOpacityMicromapPropertiesEXT();
+
+    switch (m_params.mode)
+    {
+    case 2:
+        if (m_params.subdivisionLevel > opacityMicromapPropertiesEXT.maxOpacity2StateSubdivisionLevel)
+            TCU_THROW(NotSupportedError, "Requires a higher supported 2 state subdivision level");
+        break;
+    case 4:
+        if (m_params.subdivisionLevel > opacityMicromapPropertiesEXT.maxOpacity4StateSubdivisionLevel)
+            TCU_THROW(NotSupportedError, "Requires a higher supported 4 state subdivision level");
+        break;
+    default:
+        DE_ASSERT(false);
+        break;
+    }
+}
+
+void OpacityMicromapManyTrianglesCase::initPrograms(vk::SourceCollections &programCollection) const
+{
+    const vk::ShaderBuildOptions buildOptions(programCollection.usedVulkanVersion, vk::SPIRV_VERSION_1_4, 0u, true);
+
+    std::map<std::string, std::string> params;
+    params["DECLS"] = R"glsl(layout(set=0, binding=0) uniform accelerationStructureEXT topLevelAS;
+layout(set=0, binding=1, std430) buffer RayOrigins {
+  vec4 values[];
+} origins;
+layout(set=0, binding=2, std430) buffer OutputModes {
+  uint values[];
+} modes;)glsl";
+
+    static const char *const rgen = R"glsl(#version 460 core
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_opacity_micromap : require
+
+layout(location=0) rayPayloadEXT uint value;
+
+${DECLS}
+
+void main()
+{
+  const uint  cullMask  = 0xFF;
+  const vec3  origin    = origins.values[gl_LaunchIDEXT.x].xyz;
+  const vec3  direction = vec3(0.0, 0.0, -1.0);
+  const float tMin      = 0.0;
+  const float tMax      = 2.0;
+  value                 = 0xFFFFFFFF;
+  traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, cullMask, 0, 0, 0, origin, tMin, direction, tMax, 0);
+  modes.values[gl_LaunchIDEXT.x] = value;
+}
+)glsl";
+
+    static const char *const ah = R"glsl(#version 460 core
+#extension GL_EXT_ray_tracing : require
+
+${DECLS}
+
+layout(location=0) rayPayloadInEXT uint value;
+
+void main()
+{
+  value = 1;
+  terminateRayEXT;
+}
+)glsl";
+
+    static const char *const ch = R"glsl(#version 460 core
+#extension GL_EXT_ray_tracing : require
+
+${DECLS}
+
+layout(location=0) rayPayloadInEXT uint value;
+
+void main()
+{
+  if (value != 1) {
+    value = 2;
+  }
+}
+)glsl";
+
+    static const char *const miss = R"glsl(#version 460 core
+#extension GL_EXT_ray_tracing : require
+
+${DECLS}
+
+layout(location=0) rayPayloadInEXT uint value;
+
+void main()
+{
+  value = 0;
+}
+)glsl";
+
+    programCollection.glslSources.add("rgen")
+        << glu::RaygenSource(updateRayTracingGLSL(tcu::StringTemplate(rgen).specialize(params))) << buildOptions;
+    programCollection.glslSources.add("miss")
+        << glu::MissSource(updateRayTracingGLSL(tcu::StringTemplate(miss).specialize(params))) << buildOptions;
+    programCollection.glslSources.add("ah")
+        << glu::AnyHitSource(updateRayTracingGLSL(tcu::StringTemplate(ah).specialize(params))) << buildOptions;
+    programCollection.glslSources.add("ch")
+        << glu::ClosestHitSource(updateRayTracingGLSL(tcu::StringTemplate(ch).specialize(params))) << buildOptions;
+}
+
+TestInstance *OpacityMicromapManyTrianglesCase::createInstance(Context &context) const
+{
+    return new OpacityMicromapManyTrianglesInstance(context, m_params);
+}
+
+OpacityMicromapManyTrianglesInstance::OpacityMicromapManyTrianglesInstance(Context &context,
+                                                                           const ManyTrianglesParams &params)
+    : TestInstance(context)
+    , m_params(params)
+{
+}
+
+tcu::TestStatus OpacityMicromapManyTrianglesInstance::iterate(void)
+{
+    const auto &vki    = m_context.getInstanceInterface();
+    const auto physDev = m_context.getPhysicalDevice();
+    const auto &vkd    = m_context.getDeviceInterface();
+    const auto device  = m_context.getDevice();
+    auto &alloc        = m_context.getDefaultAllocator();
+    const auto qIndex  = m_context.getUniversalQueueFamilyIndex();
+    const auto queue   = m_context.getUniversalQueue();
+    const auto stages  = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |
+                        VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+
+    const auto cmdPool      = makeCommandPool(vkd, device, qIndex);
+    const auto cmdBufferPtr = allocateCommandBuffer(vkd, device, cmdPool.get(), VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    const auto cmdBuffer    = cmdBufferPtr.get();
+
+    beginCommandBuffer(vkd, cmdBuffer);
+
+    auto topLevelAS    = makeTopLevelAccelerationStructure();
+    auto bottomLevelAS = makeBottomLevelAccelerationStructure();
+
+    const uint32_t triangleCount         = m_params.triangleCount;
+    const uint32_t numSubtriangles       = levelToSubtriangles(m_params.subdivisionLevel);
+    const uint32_t triangleMicromapBytes = (m_params.mode == 2) ? (numSubtriangles + 7) / 8 : (numSubtriangles + 3) / 4;
+    const uint32_t opacityMicromapBytes  = triangleMicromapBytes * triangleCount;
+
+    // One independent micromap triangle per geometry triangle, each with its own random opacity data.
+    std::vector<uint8_t> opacityMicromapData;
+    opacityMicromapData.reserve(opacityMicromapBytes);
+    de::Random rnd(m_params.seed);
+    while (opacityMicromapData.size() < opacityMicromapBytes)
+        opacityMicromapData.push_back(rnd.getUint8());
+
+    // Lay the micromap build input out as [triangle array][index buffer][opacity data], each 256-aligned.
+    const auto align256                = [](uint32_t v) { return (v + 255u) & ~255u; };
+    const uint32_t triangleArrayOffset = 0u;
+    const uint32_t indexOffset         = align256(triangleCount * static_cast<uint32_t>(sizeof(VkMicromapTriangleEXT)));
+    const uint32_t dataOffset = align256(indexOffset + triangleCount * static_cast<uint32_t>(sizeof(uint32_t)));
+
+    VkMicromapUsageEXT mmUsage = {};
+    mmUsage.count              = triangleCount;
+    mmUsage.subdivisionLevel   = m_params.subdivisionLevel;
+    mmUsage.format =
+        m_params.mode == 2 ? VK_OPACITY_MICROMAP_FORMAT_2_STATE_EXT : VK_OPACITY_MICROMAP_FORMAT_4_STATE_EXT;
+
+    const auto micromapDataBufferSize = static_cast<VkDeviceSize>(dataOffset + opacityMicromapBytes + 256u);
+    const auto micromapDataBufferCreateInfo =
+        makeBufferCreateInfo(micromapDataBufferSize, VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT |
+                                                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    BufferWithMemory micromapDataBuffer(vkd, device, alloc, micromapDataBufferCreateInfo,
+                                        MemoryRequirement::HostVisible | MemoryRequirement::DeviceAddress);
+    auto &micromapDataBufferAlloc = micromapDataBuffer.getAllocation();
+    void *micromapDataBufferData  = micromapDataBufferAlloc.getHostPtr();
+
+    {
+        uint8_t *data = static_cast<uint8_t *>(micromapDataBufferData);
+        deMemset(data, 0, size_t(micromapDataBufferCreateInfo.size));
+
+        DE_STATIC_ASSERT(sizeof(VkMicromapTriangleEXT) == 8);
+
+        for (uint32_t i = 0u; i < triangleCount; ++i)
+        {
+            VkMicromapTriangleEXT *tri = reinterpret_cast<VkMicromapTriangleEXT *>(&data[triangleArrayOffset]) + i;
+            tri->dataOffset            = triangleMicromapBytes * i;
+            tri->subdivisionLevel      = uint16_t(mmUsage.subdivisionLevel);
+            tri->format                = uint16_t(mmUsage.format);
+        }
+
+        for (uint32_t i = 0u; i < triangleCount; ++i)
+            reinterpret_cast<uint32_t *>(&data[indexOffset])[i] = i;
+
+        for (size_t i = 0; i < opacityMicromapData.size(); ++i)
+            data[dataOffset + i] = opacityMicromapData[i];
+    }
+
+    // Build the micromap.
+    VkMicromapBuildInfoEXT mmBuildInfo = {
+        VK_STRUCTURE_TYPE_MICROMAP_BUILD_INFO_EXT,                // VkStructureType sType;
+        nullptr,                                                  // const void* pNext;
+        VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT,                    // VkMicromapTypeEXT type;
+        0,                                                        // VkBuildMicromapFlagsEXT flags;
+        VK_BUILD_MICROMAP_MODE_BUILD_EXT,                         // VkBuildMicromapModeEXT mode;
+        VK_NULL_HANDLE,                                           // VkMicromapEXT dstMicromap;
+        1,                                                        // uint32_t usageCountsCount;
+        &mmUsage,                                                 // const VkMicromapUsageEXT* pUsageCounts;
+        nullptr,                                                  // const VkMicromapUsageEXT* const* ppUsageCounts;
+        makeDeviceOrHostAddressConstKHR(nullptr),                 // VkDeviceOrHostAddressConstKHR data;
+        makeDeviceOrHostAddressKHR(nullptr),                      // VkDeviceOrHostAddressKHR scratchData;
+        makeDeviceOrHostAddressConstKHR(nullptr),                 // VkDeviceOrHostAddressConstKHR triangleArray;
+        static_cast<VkDeviceSize>(sizeof(VkMicromapTriangleEXT)), // VkDeviceSize triangleArrayStride;
+    };
+
+    VkMicromapBuildSizesInfoEXT sizeInfo = {
+        VK_STRUCTURE_TYPE_MICROMAP_BUILD_SIZES_INFO_EXT, // VkStructureType sType;
+        nullptr,                                         // const void* pNext;
+        0,                                               // VkDeviceSize micromapSize;
+        0,                                               // VkDeviceSize buildScratchSize;
+        false,                                           // VkBool32 discardable;
+    };
+
+    vkd.getMicromapBuildSizesEXT(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &mmBuildInfo, &sizeInfo);
+
+    const auto micromapBackingBufferCreateInfo = makeBufferCreateInfo(
+        sizeInfo.micromapSize, VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    BufferWithMemory micromapBackingBuffer(vkd, device, alloc, micromapBackingBufferCreateInfo,
+                                           MemoryRequirement::Local | MemoryRequirement::DeviceAddress);
+
+    const auto micromapScratchBufferCreateInfo =
+        makeBufferCreateInfo(sizeInfo.buildScratchSize,
+                             VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+    BufferWithMemory micromapScratchBuffer(vkd, device, alloc, micromapScratchBufferCreateInfo,
+                                           MemoryRequirement::Local | MemoryRequirement::DeviceAddress);
+
+    VkMicromapCreateInfoEXT maCreateInfo = {
+        VK_STRUCTURE_TYPE_MICROMAP_CREATE_INFO_EXT, // VkStructureType sType;
+        nullptr,                                    // const void* pNext;
+        0,                                          // VkMicromapCreateFlagsEXT createFlags;
+        micromapBackingBuffer.get(),                // VkBuffer buffer;
+        0,                                          // VkDeviceSize offset;
+        sizeInfo.micromapSize,                      // VkDeviceSize size;
+        VK_MICROMAP_TYPE_OPACITY_MICROMAP_EXT,      // VkMicromapTypeEXT type;
+        0ull                                        // VkDeviceAddress deviceAddress;
+    };
+
+    Move<VkMicromapEXT> micromap = vk::createMicromapEXT(vkd, device, &maCreateInfo);
+
+    mmBuildInfo.dstMicromap = *micromap;
+    mmBuildInfo.data        = makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(), dataOffset);
+    mmBuildInfo.triangleArray =
+        makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(), triangleArrayOffset);
+    mmBuildInfo.scratchData = makeDeviceOrHostAddressKHR(vkd, device, micromapScratchBuffer.get(), 0);
+
+    vkd.cmdBuildMicromapsEXT(cmdBuffer, 1, &mmBuildInfo);
+
+    {
+        VkMemoryBarrier2 memoryBarrier     = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                                              NULL,
+                                              VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT,
+                                              VK_ACCESS_2_MICROMAP_WRITE_BIT_EXT,
+                                              VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                              VK_ACCESS_2_MICROMAP_READ_BIT_EXT};
+        VkDependencyInfoKHR dependencyInfo = {
+            VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR, // VkStructureType sType;
+            nullptr,                               // const void* pNext;
+            0u,                                    // VkDependencyFlags dependencyFlags;
+            1u,                                    // uint32_t memoryBarrierCount;
+            &memoryBarrier,                        // const VkMemoryBarrier2KHR* pMemoryBarriers;
+            0u,                                    // uint32_t bufferMemoryBarrierCount;
+            nullptr,                               // const VkBufferMemoryBarrier2KHR* pBufferMemoryBarriers;
+            0u,                                    // uint32_t imageMemoryBarrierCount;
+            nullptr,                               // const VkImageMemoryBarrier2KHR* pImageMemoryBarriers;
+        };
+
+        vkd.cmdPipelineBarrier2(cmdBuffer, &dependencyInfo);
+    }
+
+    // Attach the micromap to the geometry; one index entry per geometry triangle (triangle t -> micromap triangle t).
+    VkAccelerationStructureTrianglesOpacityMicromapEXT opacityGeometryMicromap = {
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_TRIANGLES_OPACITY_MICROMAP_EXT, //VkStructureType sType;
+        nullptr,                                                                 //void* pNext;
+        VK_INDEX_TYPE_UINT32,                                                    //VkIndexType indexType;
+        makeDeviceOrHostAddressConstKHR(vkd, device, micromapDataBuffer.get(),
+                                        indexOffset), //VkDeviceOrHostAddressConstKHR indexBuffer;
+        static_cast<VkDeviceSize>(sizeof(uint32_t)),  //VkDeviceSize indexStride;
+        0u,                                           //uint32_t baseTriangle;
+        1u,                                           //uint32_t usageCountsCount;
+        &mmUsage,                                     //const VkMicromapUsageEXT* pUsageCounts;
+        nullptr,                                      //const VkMicromapUsageEXT* const* ppUsageCounts;
+        *micromap                                     //VkMicromapEXT micromap;
+    };
+
+    // A grid of independent, non-overlapping triangles, one per micromap triangle.
+    uint32_t gridDim = 1u;
+    while (gridDim * gridDim < triangleCount)
+        ++gridDim;
+
+    const float triSize = 0.5f;
+    std::vector<tcu::Vec3> vertices;
+    vertices.reserve(triangleCount * 3u);
+    for (uint32_t t = 0u; t < triangleCount; ++t)
+    {
+        const float bx = float(t % gridDim);
+        const float by = float(t / gridDim);
+        vertices.push_back(tcu::Vec3(bx, by, 0.0f));
+        vertices.push_back(tcu::Vec3(bx + triSize, by, 0.0f));
+        vertices.push_back(tcu::Vec3(bx, by + triSize, 0.0f));
+    }
+
+    AccelerationStructBufferProperties bufferProps;
+    bufferProps.props.residency = ResourceResidency::TRADITIONAL;
+
+    bottomLevelAS->addGeometry(vertices, true /*is triangles*/, 0 /*flags*/, &opacityGeometryMicromap);
+    bottomLevelAS->createAndBuild(vkd, device, cmdBuffer, alloc, bufferProps);
+    de::SharedPtr<BottomLevelAccelerationStructure> blasSharedPtr(bottomLevelAS.release());
+
+    topLevelAS->setInstanceCount(1);
+    topLevelAS->addInstance(blasSharedPtr, identityMatrix3x4, 0, 0xFFu, 0u, 0);
+    topLevelAS->createAndBuild(vkd, device, cmdBuffer, alloc, bufferProps);
+
+    // One ray per subtriangle of every triangle.
+    const uint32_t numRays = triangleCount * numSubtriangles;
+
+    std::vector<tcu::Vec4> origins;
+    std::vector<uint32_t> expectedOutputModes;
+    origins.reserve(numRays);
+    expectedOutputModes.reserve(numRays);
+
+    for (uint32_t t = 0u; t < triangleCount; ++t)
+    {
+        const float bx                  = float(t % gridDim);
+        const float by                  = float(t / gridDim);
+        const uint32_t triangleDataBase = t * triangleMicromapBytes;
+
+        for (uint32_t s = 0u; s < numSubtriangles; ++s)
+        {
+            uint32_t state;
+            if (m_params.mode == 2)
+            {
+                const uint8_t byte = opacityMicromapData[triangleDataBase + s / 8];
+                state              = (byte >> (s % 8)) & 0x1;
+            }
+            else
+            {
+                const uint8_t byte = opacityMicromapData[triangleDataBase + s / 4];
+                state              = (byte >> (2 * (s % 4))) & 0x3;
+            }
+            // Map the raw value through the special-index number space (no ray/instance flags here):
+            // transparent -> miss (0), opaque -> closest-hit (2), unknown -> any-hit (1).
+            state = ~state;
+
+            uint32_t expected;
+            if (state == uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_TRANSPARENT_EXT))
+                expected = 0;
+            else if (state == uint32_t(VK_OPACITY_MICROMAP_SPECIAL_INDEX_FULLY_OPAQUE_EXT))
+                expected = 2;
+            else
+                expected = 1;
+            expectedOutputModes.push_back(expected);
+
+            const tcu::Vec2 centroid = calcSubtriangleCentroid(s, m_params.subdivisionLevel);
+            origins.push_back(tcu::Vec4(bx + triSize * centroid.x(), by + triSize * centroid.y(), 1.0f, 0.0f));
+        }
+    }
+
+    // SSBO buffer for origins.
+    const auto originsBufferSize = static_cast<VkDeviceSize>(sizeof(tcu::Vec4) * numRays);
+    const auto originsBufferInfo = makeBufferCreateInfo(originsBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    BufferWithMemory originsBuffer(vkd, device, alloc, originsBufferInfo, MemoryRequirement::HostVisible);
+    auto &originsBufferAlloc = originsBuffer.getAllocation();
+    void *originsBufferData  = originsBufferAlloc.getHostPtr();
+
+    deMemcpy(originsBufferData, origins.data(), static_cast<size_t>(originsBufferSize));
+    flushAlloc(vkd, device, originsBufferAlloc);
+
+    // Storage buffer for output modes.
+    const auto outputModesBufferSize = static_cast<VkDeviceSize>(sizeof(uint32_t) * numRays);
+    const auto outputModesBufferInfo = makeBufferCreateInfo(outputModesBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    BufferWithMemory outputModesBuffer(vkd, device, alloc, outputModesBufferInfo, MemoryRequirement::HostVisible);
+    auto &outputModesBufferAlloc = outputModesBuffer.getAllocation();
+    void *outputModesBufferData  = outputModesBufferAlloc.getHostPtr();
+    deMemset(outputModesBufferData, 0xFF, static_cast<size_t>(outputModesBufferSize));
+    flushAlloc(vkd, device, outputModesBufferAlloc);
+
+    // Descriptor set layout.
+    DescriptorSetLayoutBuilder dsLayoutBuilder;
+    dsLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, stages);
+    dsLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stages);
+    dsLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stages);
+    const auto setLayout = dsLayoutBuilder.build(vkd, device);
+
+    const auto pipelineLayout = makePipelineLayout(vkd, device, setLayout.get());
+
+    DescriptorPoolBuilder poolBuilder;
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    const auto descriptorPool = poolBuilder.build(vkd, device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u);
+    const auto descriptorSet  = makeDescriptorSet(vkd, device, descriptorPool.get(), setLayout.get());
+
+    {
+        const VkWriteDescriptorSetAccelerationStructureKHR accelDescInfo = {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            nullptr,
+            1u,
+            topLevelAS.get()->getPtr(),
+        };
+        const auto inStorageBufferInfo = makeDescriptorBufferInfo(originsBuffer.get(), 0ull, VK_WHOLE_SIZE);
+        const auto storageBufferInfo   = makeDescriptorBufferInfo(outputModesBuffer.get(), 0ull, VK_WHOLE_SIZE);
+
+        DescriptorSetUpdateBuilder updateBuilder;
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(0u),
+                                  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, &accelDescInfo);
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(1u),
+                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &inStorageBufferInfo);
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(2u),
+                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &storageBufferInfo);
+        updateBuilder.update(vkd, device);
+    }
+
+    auto rgenModule = createShaderModule(vkd, device, m_context.getBinaryCollection().get("rgen"), 0);
+    auto missModule = createShaderModule(vkd, device, m_context.getBinaryCollection().get("miss"), 0);
+    auto ahModule   = createShaderModule(vkd, device, m_context.getBinaryCollection().get("ah"), 0);
+    auto chModule   = createShaderModule(vkd, device, m_context.getBinaryCollection().get("ch"), 0);
+
+    uint32_t shaderGroupHandleSize    = 0u;
+    uint32_t shaderGroupBaseAlignment = 1u;
+    {
+        const auto rayTracingPropertiesKHR = makeRayTracingProperties(vki, physDev);
+        shaderGroupHandleSize              = rayTracingPropertiesKHR->getShaderGroupHandleSize();
+        shaderGroupBaseAlignment           = rayTracingPropertiesKHR->getShaderGroupBaseAlignment();
+    }
+
+    Move<VkPipeline> pipeline;
+    de::MovePtr<BufferWithMemory> raygenSBT;
+    de::MovePtr<BufferWithMemory> missSBT;
+    de::MovePtr<BufferWithMemory> hitSBT;
+
+    auto raygenSBTRegion   = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    auto missSBTRegion     = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    auto hitSBTRegion      = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    auto callableSBTRegion = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+
+    {
+        const auto rayTracingPipeline = de::newMovePtr<RayTracingPipeline>();
+        rayTracingPipeline->setCreateFlags(VK_PIPELINE_CREATE_RAY_TRACING_OPACITY_MICROMAP_BIT_EXT);
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_RAYGEN_BIT_KHR, rgenModule, 0);
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_MISS_BIT_KHR, missModule, 1);
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, ahModule, 2);
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, chModule, 2);
+
+        pipeline = rayTracingPipeline->createPipeline(vkd, device, pipelineLayout.get());
+
+        raygenSBT       = rayTracingPipeline->createShaderBindingTable(vkd, device, pipeline.get(), alloc,
+                                                                       shaderGroupHandleSize, shaderGroupBaseAlignment, 0, 1);
+        raygenSBTRegion = makeStridedDeviceAddressRegionKHR(getBufferDeviceAddress(vkd, device, raygenSBT->get(), 0),
+                                                            shaderGroupHandleSize, shaderGroupHandleSize);
+
+        missSBT       = rayTracingPipeline->createShaderBindingTable(vkd, device, pipeline.get(), alloc,
+                                                                     shaderGroupHandleSize, shaderGroupBaseAlignment, 1, 1);
+        missSBTRegion = makeStridedDeviceAddressRegionKHR(getBufferDeviceAddress(vkd, device, missSBT->get(), 0),
+                                                          shaderGroupHandleSize, shaderGroupHandleSize);
+
+        hitSBT = rayTracingPipeline->createShaderBindingTable(vkd, device, pipeline.get(), alloc, shaderGroupHandleSize,
+                                                              shaderGroupBaseAlignment, 2, 1);
+        hitSBTRegion = makeStridedDeviceAddressRegionKHR(getBufferDeviceAddress(vkd, device, hitSBT->get(), 0),
+                                                         shaderGroupHandleSize, shaderGroupHandleSize);
+    }
+
+    vkd.cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.get());
+    vkd.cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout.get(), 0u, 1u,
+                              &descriptorSet.get(), 0u, nullptr);
+    vkd.cmdTraceRaysKHR(cmdBuffer, &raygenSBTRegion, &missSBTRegion, &hitSBTRegion, &callableSBTRegion, numRays, 1u,
+                        1u);
+
+    const auto bufferBarrier = makeMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    vkd.cmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_HOST_BIT, 0u, 1u,
+                           &bufferBarrier, 0u, nullptr, 0u, nullptr);
+
+    endCommandBuffer(vkd, cmdBuffer);
+    submitCommandsAndWait(vkd, device, queue, cmdBuffer);
+
+    std::vector<uint32_t> outputData(expectedOutputModes.size());
+    const auto outputModesBufferSizeSz = static_cast<size_t>(outputModesBufferSize);
+
+    invalidateAlloc(vkd, device, outputModesBufferAlloc);
+    DE_ASSERT(de::dataSize(outputData) == outputModesBufferSizeSz);
+    deMemcpy(outputData.data(), outputModesBufferData, outputModesBufferSizeSz);
+
+    bool fail = false;
+    auto &log = m_context.getTestContext().getLog();
+
+    for (size_t i = 0; i < outputData.size(); ++i)
+    {
+        if (outputData[i] != expectedOutputModes[i])
+        {
+            std::ostringstream msg;
+            msg << "Ray " << i << ": expected " << expectedOutputModes[i] << " and found " << outputData[i];
+            log << tcu::TestLog::Message << msg.str() << tcu::TestLog::EndMessage;
+            fail = true;
+        }
+    }
+
+    if (fail)
+        TCU_FAIL("Unexpected values found in output buffer; check log for details --");
+    return tcu::TestStatus::pass("Pass");
+}
+
 } // namespace
 
 constexpr uint32_t kMaxSubdivisionLevel = 15;
@@ -792,6 +1414,22 @@ tcu::TestCaseGroup *createOpacityMicromapTests(tcu::TestContext &testCtx)
 
     for (uint32_t testFlagMask = 0; testFlagMask < TEST_FLAG_BIT_LAST; testFlagMask++)
     {
+        // Skip mutually exclusive flag combinations
+        const bool hasConflictingInstanceFlags = (testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_INSTANCE) &&
+                                                 (testFlagMask & TEST_FLAG_BIT_FORCE_NO_OPAQUE_INSTANCE);
+
+        const uint32_t opacityRayFlagCount = ((testFlagMask & TEST_FLAG_BIT_FORCE_OPAQUE_RAY_FLAG) ? 1 : 0) +
+                                             ((testFlagMask & TEST_FLAG_BIT_NO_OPAQUE_RAY_FLAG) ? 1 : 0) +
+                                             ((testFlagMask & TEST_FLAG_BIT_CULL_OPAQUE_RAY_FLAG) ? 1 : 0) +
+                                             ((testFlagMask & TEST_FLAG_BIT_CULL_NO_OPAQUE_RAY_FLAG) ? 1 : 0);
+
+        // At most one of gl_RayFlagsOpaqueEXT, gl_RayFlagsNoOpaqueEXT,
+        // gl_RayFlagsCullOpaqueEXT, or gl_RayFlagsCullNoOpaqueEXT can be set
+        const bool hasConflictingOpacityRayFlags = opacityRayFlagCount > 1;
+
+        if (hasConflictingInstanceFlags || hasConflictingOpacityRayFlags)
+            continue;
+
         std::string maskName = "";
 
         for (uint32_t bit = 0; bit < testFlagBitNames.size(); bit++)
@@ -819,7 +1457,13 @@ tcu::TestCaseGroup *createOpacityMicromapTests(tcu::TestContext &testCtx)
                 for (uint32_t specialIndex = 0; specialIndex < 4; specialIndex++)
                 {
                     TestParams testParams{
-                        specialIndexUse[specialIndexNdx].useSpecialIndex, false, testFlagMask, 0, ~specialIndex, seed++,
+                        specialIndexUse[specialIndexNdx].useSpecialIndex,
+                        false,
+                        false,
+                        testFlagMask,
+                        0,
+                        ~specialIndex,
+                        seed++,
                     };
 
                     std::stringstream css;
@@ -847,6 +1491,7 @@ tcu::TestCaseGroup *createOpacityMicromapTests(tcu::TestContext &testCtx)
                         TestParams testParams{
                             specialIndexUse[specialIndexNdx].useSpecialIndex,
                             false,
+                            false,
                             testFlagMask,
                             level,
                             modes[modeNdx].mode,
@@ -872,7 +1517,57 @@ tcu::TestCaseGroup *createOpacityMicromapTests(tcu::TestContext &testCtx)
             }
         }
 
+        // VK_NULL_HANDLE micromap handle
+        {
+            de::MovePtr<tcu::TestCaseGroup> nullHandleGroup(
+                new tcu::TestCaseGroup(testFlagGroup->getTestContext(), "null_handle"));
+
+            for (uint32_t specialIndex = 0; specialIndex < 4; specialIndex++)
+            {
+                TestParams testParams{
+                    true, false, true, testFlagMask, 0, ~specialIndex, seed++,
+                };
+
+                std::stringstream css;
+                css << specialIndex;
+                const auto testName = css.str();
+
+                nullHandleGroup->addChild(new OpacityMicromapCase(testCtx, testName, testParams));
+            }
+            testFlagGroup->addChild(nullHandleGroup.release());
+        }
+
         group->addChild(testFlagGroup.release());
+    }
+
+    // Multiple-triangle coverage (ISSUE_5818): a triangle count > 64^2 exercises multi-triangle build paths.
+    {
+        de::MovePtr<tcu::TestCaseGroup> manyTrianglesGroup(
+            new tcu::TestCaseGroup(group->getTestContext(), "many_triangles"));
+
+        const uint32_t triangleCount = 65u * 65u; // 4225 > 64^2
+
+        const struct
+        {
+            uint32_t mode;
+            std::string name;
+        } modes[] = {{2, "2_state"}, {4, "4_state"}};
+
+        const struct
+        {
+            uint32_t level;
+            std::string suffix;
+        } levels[] = {{0u, ""}, {2u, "_subdivision"}};
+
+        for (size_t modeNdx = 0; modeNdx < DE_LENGTH_OF_ARRAY(modes); ++modeNdx)
+            for (size_t levelNdx = 0; levelNdx < DE_LENGTH_OF_ARRAY(levels); ++levelNdx)
+            {
+                const ManyTrianglesParams params{triangleCount, modes[modeNdx].mode, levels[levelNdx].level, seed++};
+                const auto testName = modes[modeNdx].name + levels[levelNdx].suffix;
+                manyTrianglesGroup->addChild(new OpacityMicromapManyTrianglesCase(testCtx, testName, params));
+            }
+
+        group->addChild(manyTrianglesGroup.release());
     }
 
     return group.release();

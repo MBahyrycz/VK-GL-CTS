@@ -84,7 +84,7 @@ struct DeviceContext
     {
         return context->getInstanceInterface();
     }
-    const DeviceDriver &getDeviceDriver() const
+    const DeviceInterface &getDeviceDriver() const
     {
         return vd->getDeviceDriver();
     }
@@ -176,6 +176,7 @@ de::MovePtr<VkVideoEncodeH265ProfileInfoKHR> getVideoProfileExtensionH265E(
 de::MovePtr<VkVideoEncodeUsageInfoKHR> getEncodeUsageInfo(void *pNext, VkVideoEncodeUsageFlagsKHR videoUsageHints,
                                                           VkVideoEncodeContentFlagsKHR videoContentHints,
                                                           VkVideoEncodeTuningModeKHR tuningMode);
+de::MovePtr<VkVideoDecodeUsageInfoKHR> getDecodeUsageInfo(void *pNext, VkVideoDecodeUsageFlagsKHR videoUsageHints);
 de::MovePtr<VkVideoProfileInfoKHR> getVideoProfile(
     VkVideoCodecOperationFlagBitsKHR videoCodecOperation, void *pNext,
     VkVideoChromaSubsamplingFlagsKHR chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR,
@@ -386,7 +387,7 @@ public:
     bool createDeviceSupportingQueue(
         VkQueueFlags queueFlagsRequired, VkVideoCodecOperationFlagsKHR videoCodecOperationFlags,
         VideoDevice::VideoDeviceFlags videoDeviceFlags = VideoDevice::VIDEO_DEVICE_FLAG_NONE);
-    const DeviceDriver &getDeviceDriver();
+    const DeviceInterface &getDeviceDriver();
     uint32_t getQueueFamilyIndexTransfer();
     uint32_t getQueueFamilyIndexDecode();
     uint32_t getQueueFamilyIndexEncode();
@@ -1291,6 +1292,14 @@ private:
 namespace util
 {
 const char *getVideoCodecString(VkVideoCodecOperationFlagBitsKHR codec);
+
+// Returns the codec segment used in dEQP case paths ("video.decode.h264" etc.).
+const char *getVideoCodecPathSegment(VkVideoCodecOperationFlagBitsKHR codec);
+
+// Returns "video_dumps/<out_|in_><codecSegment>.<testName>[_<index>].<ext>", creating the folder in the
+// CWD if it is missing. output selects the "out_"/"in_" prefix; a negative index omits "_<index>".
+std::string getVideoDumpPath(bool output, const std::string &testName, const std::string &codecSegment,
+                             const std::string &ext, int index = -1);
 
 const char *getVideoChromaFormatString(VkVideoChromaSubsamplingFlagBitsKHR chromaFormat);
 

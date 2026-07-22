@@ -290,6 +290,20 @@ void ColorWriteEnableTest::checkSupport(Context &context) const
     if ((colorProperties.optimalTilingFeatures & kColorFeatures) != kColorFeatures)
         TCU_THROW(NotSupportedError, "Required color image features not supported");
 
+    uint32_t foundValidDSFormat = 0;
+    const vk::VkFormatFeatureFlags kDSFeatures =
+        (vk::VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | vk::VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
+
+    for (auto format : kDepthStencilFormats)
+    {
+        const auto dsProperties = vk::getPhysicalDeviceFormatProperties(vki, physicalDevice, format);
+        foundValidDSFormat += ((dsProperties.optimalTilingFeatures & kDSFeatures) == kDSFeatures);
+    }
+
+    // Not Supported because the transfer feature is not mandatory.
+    if (foundValidDSFormat == 0)
+        TCU_THROW(NotSupportedError, "Required depth/stencil image features not supported");
+
     checkPipelineConstructionRequirements(vki, physicalDevice, m_testConfig.pipelineConstructionType);
 }
 
@@ -396,20 +410,16 @@ tcu::TestStatus ColorWriteEnableInstance::iterate(void)
     // Choose depth/stencil format.
     vk::VkFormat dsFormat = vk::VK_FORMAT_UNDEFINED;
 
-    for (int formatIdx = 0; formatIdx < DE_LENGTH_OF_ARRAY(kDepthStencilFormats); ++formatIdx)
+    for (auto format : kDepthStencilFormats)
     {
-        const auto dsProperties =
-            vk::getPhysicalDeviceFormatProperties(vki, physicalDevice, kDepthStencilFormats[formatIdx]);
+        const auto dsProperties = vk::getPhysicalDeviceFormatProperties(vki, physicalDevice, format);
         if ((dsProperties.optimalTilingFeatures & kDSFeatures) == kDSFeatures)
         {
-            dsFormat = kDepthStencilFormats[formatIdx];
+            dsFormat = format;
             break;
         }
     }
 
-    // Note: Not Supported insted of Fail because the transfer feature is not mandatory.
-    if (dsFormat == vk::VK_FORMAT_UNDEFINED)
-        TCU_THROW(NotSupportedError, "Required depth/stencil image features not supported");
     log << tcu::TestLog::Message << "Chosen depth/stencil format: " << dsFormat << tcu::TestLog::EndMessage;
 
     // Swap static and dynamic values in the test configuration so the static pipeline ends up with the expected values for cases
@@ -1630,6 +1640,7 @@ TestStatus ColorWriteEnable2Instance::iterate(void)
     endCommandBuffer(m_vkd, *cmdBuff);
     submitCommandsAndWait(m_vkd, m_device, queue, *cmdBuff);
 
+    tcu::TestStatus finalStatus = tcu::TestStatus::pass("");
     for (uint32_t i = 0; i < attachmentCount; ++i)
         for (uint32_t a = 0; a < (i + 1); ++a)
         {
@@ -1639,10 +1650,10 @@ TestStatus ColorWriteEnable2Instance::iterate(void)
             tcu::TestStatus status =
                 verifyAttachment(a, (i + 1), colorBuffer->getAccess(), writeEnables, background, blendComp);
             if (status.isFail())
-                return status;
+                finalStatus = status;
         }
 
-    return TestStatus::pass("");
+    return finalStatus;
 }
 
 } // unnamed namespace

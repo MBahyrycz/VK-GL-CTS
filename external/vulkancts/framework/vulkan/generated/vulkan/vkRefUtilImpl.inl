@@ -84,6 +84,12 @@ void Deleter<VkFramebuffer>::operator() (VkFramebuffer obj) const
 }
 
 template<>
+void Deleter<VkGpaSessionAMD>::operator() (VkGpaSessionAMD obj) const
+{
+	m_deviceIface->destroyGpaSessionAMD(m_device, obj, m_allocator);
+}
+
+template<>
 void Deleter<VkImage>::operator() (VkImage obj) const
 {
 	m_deviceIface->destroyImage(m_device, obj, m_allocator);
@@ -237,6 +243,13 @@ Move<VkDeviceMemory> allocateMemory (const DeviceInterface& vk, VkDevice device,
 	return Move<VkDeviceMemory>(check<VkDeviceMemory>(object), Deleter<VkDeviceMemory>(vk, device, pAllocator));
 }
 
+Move<VkAccelerationStructureKHR> createAccelerationStructure2KHR (const DeviceInterface& vk, VkDevice device, const VkAccelerationStructureCreateInfo2KHR* pCreateInfo, const VkAllocationCallbacks* pAllocator)
+{
+	VkAccelerationStructureKHR object = VK_NULL_HANDLE;
+	VK_CHECK(vk.createAccelerationStructure2KHR(device, pCreateInfo, pAllocator, &object));
+	return Move<VkAccelerationStructureKHR>(check<VkAccelerationStructureKHR>(object), Deleter<VkAccelerationStructureKHR>(vk, device, pAllocator));
+}
+
 Move<VkAccelerationStructureKHR> createAccelerationStructureKHR (const DeviceInterface& vk, VkDevice device, const VkAccelerationStructureCreateInfoKHR* pCreateInfo, const VkAllocationCallbacks* pAllocator)
 {
 	VkAccelerationStructureKHR object = VK_NULL_HANDLE;
@@ -368,6 +381,13 @@ Move<VkFramebuffer> createFramebuffer (const DeviceInterface& vk, VkDevice devic
 	VkFramebuffer object = VK_NULL_HANDLE;
 	VK_CHECK(vk.createFramebuffer(device, pCreateInfo, pAllocator, &object));
 	return Move<VkFramebuffer>(check<VkFramebuffer>(object), Deleter<VkFramebuffer>(vk, device, pAllocator));
+}
+
+Move<VkGpaSessionAMD> createGpaSessionAMD (const DeviceInterface& vk, VkDevice device, const VkGpaSessionCreateInfoAMD* pCreateInfo, const VkAllocationCallbacks* pAllocator)
+{
+	VkGpaSessionAMD object = VK_NULL_HANDLE;
+	VK_CHECK(vk.createGpaSessionAMD(device, pCreateInfo, pAllocator, &object));
+	return Move<VkGpaSessionAMD>(check<VkGpaSessionAMD>(object), Deleter<VkGpaSessionAMD>(vk, device, pAllocator));
 }
 
 Move<VkSurfaceKHR> createHeadlessSurfaceEXT (const InstanceInterface& vk, VkInstance instance, const VkHeadlessSurfaceCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator)
@@ -571,6 +591,13 @@ Move<VkTensorViewARM> createTensorViewARM (const DeviceInterface& vk, VkDevice d
 	VkTensorViewARM object = VK_NULL_HANDLE;
 	VK_CHECK(vk.createTensorViewARM(device, pCreateInfo, pAllocator, &object));
 	return Move<VkTensorViewARM>(check<VkTensorViewARM>(object), Deleter<VkTensorViewARM>(vk, device, pAllocator));
+}
+
+Move<VkSurfaceKHR> createUbmSurfaceSEC (const InstanceInterface& vk, VkInstance instance, const VkUbmSurfaceCreateInfoSEC* pCreateInfo, const VkAllocationCallbacks* pAllocator)
+{
+	VkSurfaceKHR object = VK_NULL_HANDLE;
+	VK_CHECK(vk.createUbmSurfaceSEC(instance, pCreateInfo, pAllocator, &object));
+	return Move<VkSurfaceKHR>(check<VkSurfaceKHR>(object), Deleter<VkSurfaceKHR>(vk, instance, pAllocator));
 }
 
 Move<VkSurfaceKHR> createViSurfaceNN (const InstanceInterface& vk, VkInstance instance, const VkViSurfaceCreateInfoNN* pCreateInfo, const VkAllocationCallbacks* pAllocator)

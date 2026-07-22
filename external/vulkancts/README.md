@@ -95,6 +95,26 @@ download the required sample clips by running the two helper scripts in the
 Each script will pull down the necessary video files into the CTS data tree.
 Both scripts support the `--help` flag to list all available options.
 
+### Video Test Control
+
+The `DEQP_DISABLE_VK_VIDEO_TESTS` CMake option controls Vulkan video tests. When enabled, video tests are built but reported as "NotSupported" when run.
+
+When `DEQP_DISABLE_VK_VIDEO_TESTS=ON`, the following occurs:
+- Video tests are built but throw `NotSupportedError` when executed
+- Vulkan-Video-Samples and Video Generator external dependencies are not built.
+
+This option is automatically enabled (set to ON) when building on operating systems other than UNIX and WIN32, as video functionality may not be available or supported on those platforms.
+
+To control video test behavior:
+
+```bash
+# Disable video tests (build but report as not-supported)
+cmake -DDEQP_DISABLE_VK_VIDEO_TESTS=ON <path to vulkancts>
+
+# Enable video tests with full functionality (default on UNIX and WIN32)
+cmake -DDEQP_DISABLE_VK_VIDEO_TESTS=OFF <path to vulkancts>
+```
+
 ### Windows x86-32
 
 	cmake <path to vulkancts> -G"Visual Studio 14"
@@ -161,10 +181,11 @@ This is identical to the builds on other platforms and is better for iterative
 runs of headless tests as CTS can be invoked and the output can be checked from
 a single interactive terminal.
 
-This build doesn't support WSI tests and shouldn't be used for conformance
-submissions, it also isn't recommended for longer running tests since Android
-will terminate this process as soon as the `adb shell` session ends which may
-happen due to an unintentional device disconnection.
+This build supports WSI tests via a headless AImageReader fallback for Vulkan
+(Android API 24+). However, it shouldn't be used for conformance submissions.
+It also isn't recommended for longer running tests since Android will terminate
+this process as soon as the `adb shell` session ends, which may happen due to
+an unintentional device disconnection.
 
 	cmake <path to vulkancts> -GNinja -DCMAKE_BUILD_TYPE=Debug \
 	      -DCMAKE_TOOLCHAIN_FILE=<NDK path>/build/cmake/android.toolchain.cmake \
@@ -312,6 +333,8 @@ Vulkan compute-only implementations must be tested using option
 
 	--deqp-compute-only=enable
 
+When this option is enabled, all non-compute tests will report as unsupported.
+
 There are several additional options used only in conjunction with Vulkan SC tests
 ( for Vulkan SC CTS tests deqp-vksc application should be used ).
 
@@ -374,6 +397,21 @@ It informs deqp-vksc application that it works as subprocess:
 For platforms where it is needed to override the default loader library path, this option can be used (e.g. loader library vulkan-1.dll):
 
 	--deqp-vk-library-path=<path>
+
+Some tests are written to cover the full set of configurations the Vulkan API
+allows, regardless of whether the device under test supports each one. For
+example, a test exercising every possible image format builds the work (such as
+shaders) for all of them, even though a given implementation supports only a
+subset. This option informs such tests that they may run in "vendor-specific
+mode":
+
+	--deqp-vk-vendor-specific=[enable|disable]
+
+When enabled, a test adapts to the implementation under test and exercises
+exactly the configurations that device supports, neither more nor fewer,
+instead of the full generic set common to all implementations. In the image
+format example above, the test would build shaders for precisely the formats
+the device exposes. This option is disabled by default.
 
 No other command line options are allowed.
 
@@ -557,6 +595,52 @@ will ensure the issue can be progressed as rapidly as possible. Issues must
 be labeled "Waiver" (TODO!) and identify the version of the CTS and affected
 tests.
 
+### Waiver File Format
+
+The `--deqp-waiver-file` command line option allows you to specify an XML file
+containing tests that should be waived.
+
+Each `<waiver>` entry must contain three attributes: `vendorName`, `vendorId` and `url`.
+- `url` should be a full path to gitlab issue(s)
+- Waiver tag should have one `<description>` child that describes issue
+- Waiver tag should have one `<device_list>` child
+- Device list should have one or more `<d>` elements containing device ids for which this waiver was created
+- Waiver tag should contain one or more `<t>` elements containing test paths that should be waived
+- String in `<t>` can use wildcard `*`
+
+**XML Schema:**
+
+```xml
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+<xs:element name="waiver_list">
+<xs:complexType>
+	<xs:sequence>
+		<xs:element name="waiver" maxOccurs="unbounded">
+		<xs:complexType>
+			<xs:sequence>
+				<xs:element name="description" type="xs:string"/>
+				<xs:element name="device_list">
+				<xs:complexType>
+					<xs:sequence>
+						<xs:element name="d" type="xs:integer" minOccurs="1" maxOccurs="unbounded"/>
+					</xs:sequence>
+				</xs:complexType>
+				</xs:element>
+				<xs:element name="t" type="xs:string" minOccurs="1" maxOccurs="unbounded"/>
+			</xs:sequence>
+			<xs:attribute name="vendorName" type="xs:string" use="required"/>
+			<xs:attribute name="vendorId" type="xs:string" use="required"/>
+			<xs:attribute name="url" type="xs:string" use="required"/>
+		</xs:complexType>
+		</xs:element>
+	</xs:sequence>
+</xs:complexType>
+</xs:element>
+</xs:schema>
+```
+
+See `external/vulkancts/mustpass/main/waivers.xml` for real-world examples.
+
 Conformance Criteria
 --------------------
 
@@ -607,14 +691,14 @@ Validation Layers
 -----------------
 
 Vulkan CTS framework includes first-party support for validation layers, that
-can be turned on with `--deqp-validation=enable` command line option.
+can be turned on with `--deqp-vk-validation=enable` command line option.
 
 When validation is turned on, default instance and device will be created with
 validation layers enabled and debug callback is registered to record any
 messages. Debug messages collected during test execution will be included at
 the end of the test case log.
 
-In addition, when the `--deqp-print-validation-errors` command line option is
+In addition, when the `--deqp-vk-print-validation-errors` command line option is
 used, validation errors are additionally printed to standard error in the
 moment they are generated.
 
@@ -814,6 +898,9 @@ OpenGL and OpenCL parameters not affecting Vulkan API were suppressed.
   -n, --deqp-case=<value>
     Test case(s) to run, supports wildcards (e.g. dEQP-GLES2.info.*) and commas to separate multiple patterns
 
+  -e, --deqp-exclude-case=<value>
+    Test case(s) to exclude, supports wildcards, works in conjunction witch -n, --deqp-case
+
   --deqp-caselist=<value>
     Case list to run in trie format (e.g. {dEQP-GLES2{info{version,renderer}}})
 
@@ -830,7 +917,7 @@ OpenGL and OpenCL parameters not affecting Vulkan API were suppressed.
     Write test results to given file
     default: 'TestResults.qpa'
 
-  --deqp-runmode=[execute|xml-caselist|txt-caselist|stdout-caselist]
+  --deqp-runmode=[execute|xml-caselist|txt-caselist|stdout-caselist|txt-trie|stdout-trie]
     Execute tests, or write list of test cases into a file
     default: 'execute'
 
@@ -841,6 +928,14 @@ OpenGL and OpenCL parameters not affecting Vulkan API were suppressed.
   --deqp-watchdog=[enable|disable]
     Enable test watchdog
     default: 'disable'
+
+  --deqp-watchdog-total-time-limit=<value>
+    Total test case time limit in seconds
+    default: '300'
+
+  --deqp-watchdog-interval-time-limit=<value>
+    Per iteration time limit in seconds
+    default: '30'
 
   --deqp-crashhandler=[enable|disable]
     Enable crash handling
@@ -910,7 +1005,7 @@ OpenGL and OpenCL parameters not affecting Vulkan API were suppressed.
     Enable or disable the compact version of the log
     default: 'disable'
 
-  --deqp-validation=[enable|disable]
+  --deqp-vk-validation=[enable|disable]
     Enable or disable test case validation
     default: 'disable'
 
@@ -918,7 +1013,7 @@ OpenGL and OpenCL parameters not affecting Vulkan API were suppressed.
     Enable or disable spir-v shader validation
     default: 'disable' in release builds, 'enable' in debug builds
 
-  --deqp-print-validation-errors
+  --deqp-vk-print-validation-errors
     Print validation errors to standard error
 
   --deqp-duplicate-case-name-check=[enable|disable]
@@ -1054,6 +1149,10 @@ OpenGL and OpenCL parameters not affecting Vulkan API were suppressed.
 
   --deqp-vk-video-encode-dump=[disable|yuv|bitstream|all]
     Dump mode for output of vulkan video encoding tests
+    default: 'disable'
+
+  --deqp-vk-vendor-specific=[enable|disable]
+    Allows you to use vendor-specific configuration
     default: 'disable'
 
 Full list of parameters for the `vksc-server` application:

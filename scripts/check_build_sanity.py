@@ -33,10 +33,12 @@ from ctsbuild.build import *
 pythonExecutable = sys.executable or "python"
 
 class Environment:
-    def __init__ (self, srcDir, tmpDir, verbose):
+    def __init__ (self, srcDir, tmpDir, verbose, spirvJobs, spirvFractions):
         self.srcDir = srcDir
         self.tmpDir = tmpDir
         self.verbose = verbose
+        self.spirvJobs = spirvJobs
+        self.spirvFractions = spirvFractions
 
 class BuildTestStep:
     def getName (self):
@@ -80,18 +82,19 @@ class BuildConfigGen:
         return True
 
 class UnixConfig(BuildConfigGen):
-    def __init__ (self, target, buildType, cc, cpp, cflags):
+    def __init__ (self, target, buildType, cc, cpp, cflags, extraConfigArgs=None):
         self.target = target
         self.buildType = buildType
         self.cc = cc
         self.cpp = cpp
         self.cflags = cflags
+        self.extraConfigArgs = extraConfigArgs if extraConfigArgs else []
 
     def isAvailable (self, env):
         return which(self.cc) != None and which(self.cpp) != None
 
     def getBuildConfig (self, env, buildDir):
-        args = makeBuildArgs(self.target, self.cc, self.cpp, self.cflags)
+        args = makeBuildArgs(self.target, self.cc, self.cpp, self.cflags) + self.extraConfigArgs
         return BuildConfig(buildDir, self.buildType, args, env.srcDir)
 
 class VSConfig(BuildConfigGen):
@@ -180,6 +183,14 @@ BUILD_TARGETS = [
                      "clang++" + CLANG_VERSION,
                      CLANG_64BIT_CFLAGS),
           ANY_UNIX_GENERATOR),
+    Build("clang-64-debug-no-video",
+          UnixConfig("null",
+                     "Debug",
+                     "clang" + CLANG_VERSION,
+                     "clang++" + CLANG_VERSION,
+                     CLANG_64BIT_CFLAGS,
+                     ["-DDEQP_DISABLE_VK_VIDEO_TESTS=ON"]),
+          ANY_UNIX_GENERATOR),
     Build("gcc-32-debug",
           UnixConfig("null",
                      "Debug",
@@ -204,9 +215,7 @@ EARLY_SPECIAL_RECIPES = [
             RunScript(os.path.join("scripts", "gen_egl.py")),
             RunScript(os.path.join("scripts", "opengl", "gen_all.py")),
             RunScript(os.path.join("external", "vulkancts", "scripts", "gen_framework.py"), lambda env: [] + (["--verbose"] if env.verbose else [])),
-            RunScript(os.path.join("external", "vulkancts", "scripts", "gen_framework_c.py"), lambda env: [] + (["--verbose"] if env.verbose else [])),
-            RunScript(os.path.join("external", "vulkancts", "scripts", "gen_framework.py"), lambda env: ["--api", "SC"] + (["--verbose"] if env.verbose else [])),
-            RunScript(os.path.join("external", "vulkancts", "scripts", "gen_framework_c.py"), lambda env: ["--api", "SC"] + (["--verbose"] if env.verbose else [])),
+            RunScript(os.path.join("external", "vulkancts", "scripts", "gen_framework.py"), lambda env: ["--api", "vulkansc"] + (["--verbose"] if env.verbose else [])),
             RunScript(os.path.join("scripts", "gen_android_bp.py")),
             RunScript(os.path.join("scripts", "gen_khronos_cts_bp.py"))
         ]),
@@ -215,17 +224,24 @@ EARLY_SPECIAL_RECIPES = [
 LATE_SPECIAL_RECIPES = [
     ('android-mustpass', [
             RunScript(os.path.join("scripts", "build_android_mustpass.py"),
-                      lambda env: ["--build-dir", os.path.join(env.tmpDir, "android-mustpass")] + (["--verbose"] if env.verbose else [])),
+                      lambda env: ["--build-type", "Release",
+                                    "--build-dir", os.path.join(env.tmpDir, "android-mustpass")] + (["--verbose"] if env.verbose else [])),
         ]),
     ('vulkan-mustpass', [
             RunScript(os.path.join("external", "vulkancts", "scripts", "build_mustpass.py"),
-                      lambda env: ["--build-dir", os.path.join(env.tmpDir, "vulkan-mustpass")] + (["--verbose"] if env.verbose else [])),
+                      lambda env: ["--build-type", "Release",
+                                    "--build-dir", os.path.join(env.tmpDir, "vulkan-mustpass")] + (["--verbose"] if env.verbose else [])),
         ]),
     ('spirv-binaries', [
+            # Concurrency (-p) drives peak memory: each vk-build-programs fraction can
+            # spike RAM independently, so running too many at once OOMs the agent
+            # (std::bad_alloc, reported as exit signal 6 / SIGABRT). Tune with the
+            # --spirv-jobs / --spirv-fractions options (default 4 jobs).
             RunScript(os.path.join("external", "vulkancts", "scripts", "build_spirv_binaries.py"),
                       lambda env: ["--build-type", "Release",
                                     "--build-dir", os.path.join(env.tmpDir, "spirv-binaries"),
-                                    "--dst-path", os.path.join(env.tmpDir, "spirv-binaries")] + (["--verbose"] if env.verbose else [])),
+                                    "--dst-path", os.path.join(env.tmpDir, "spirv-binaries"),
+                                    "-p", str(env.spirvJobs), "-f", str(env.spirvFractions)] + (["--verbose"] if env.verbose else [])),
         ]),
     ('amber-verify', [
             RunScript(os.path.join("external", "vulkancts", "scripts", "amber_verify.py"),
@@ -299,16 +315,30 @@ def parseArgs ():
                         dest="applyPostExternalDependencyCleanup",
                         action="store_true",
                         help="skip external dependency clean up")
+    parser.add_argument("--clean-mustpass",
+                        dest="cleanMustpass",
+                        action="store_true",
+                        help="Wipe generated mustpass output (keeping hand-maintained inputs) before any recipe runs. Intended for the maintainer workflow that prunes obsolete files; not for CI.")
     parser.add_argument("-v", "--verbose",
                         dest="verbose",
                         action="store_true",
                         help="Enable verbose logging")
+    parser.add_argument("--spirv-jobs",
+                        dest="spirvJobs",
+                        type=int,
+                        default=4,
+                        help="spirv-binaries: max vk-build-programs fractions to run concurrently (peak memory scales with this)")
+    parser.add_argument("--spirv-fractions",
+                        dest="spirvFractions",
+                        type=int,
+                        default=32,
+                        help="spirv-binaries: number of disjoint fractions to split the work into")
 
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parseArgs()
-    env = Environment(args.srcDir, args.tmpDir, args.verbose)
+    env = Environment(args.srcDir, args.tmpDir, args.verbose, args.spirvJobs, args.spirvFractions)
     initializeLogger(args.verbose)
 
     if args.dumpRecipes:
@@ -318,6 +348,9 @@ if __name__ == "__main__":
                     print(name)
                     break
     else:
+        if args.cleanMustpass:
+            RunScript(os.path.join("scripts", "clean_generated_mustpass.py")).run(env)
+
         selectedRecipes = getAllRecipe(RECIPES) if args.recipes == "all" \
                         else getRecipesByName(RECIPES, args.recipes)
 

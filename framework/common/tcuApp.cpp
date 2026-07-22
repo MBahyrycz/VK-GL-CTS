@@ -26,6 +26,7 @@
 #include "tcuTestContext.hpp"
 #include "tcuTestSessionExecutor.hpp"
 #include "tcuTestHierarchyUtil.hpp"
+#include "tcuMustpassGen.hpp"
 #include "tcuCommandLine.hpp"
 #include "tcuTestLog.hpp"
 
@@ -47,7 +48,8 @@ using std::string;
  *  only. It's possible to use test selectors for limiting the export
  *  to one package in a multipackage binary.
  *//*--------------------------------------------------------------------*/
-static void writeCaselistsToStdout(TestPackageRoot &root, TestContext &testCtx)
+static void writeCaselistsToStdout(TestPackageRoot &root, TestContext &testCtx, bool printPrefix = true,
+                                   bool skipGroups = false)
 {
     DefaultHierarchyInflater inflater(testCtx);
     de::MovePtr<const CaseListFilter> caseListFilter(
@@ -61,8 +63,14 @@ static void writeCaselistsToStdout(TestPackageRoot &root, TestContext &testCtx)
         while (iter.getNode()->getNodeType() != NODETYPE_PACKAGE)
         {
             if (iter.getState() == TestHierarchyIterator::STATE_ENTER_NODE)
-                std::cout << (isTestNodeTypeExecutable(iter.getNode()->getNodeType()) ? "TEST" : "GROUP") << ": "
-                          << iter.getNodePath() << "\n";
+            {
+                const bool isTest = isTestNodeTypeExecutable(iter.getNode()->getNodeType());
+                if (isTest || !skipGroups)
+                {
+                    const char *prefix = (printPrefix ? (isTest ? "TEST: " : "GROUP: ") : "");
+                    std::cout << prefix << iter.getNodePath() << "\n";
+                }
+            }
             iter.next();
         }
 
@@ -149,8 +157,8 @@ App::App(Platform &platform, Archive &archive, TestLog &log, const CommandLine &
 
         // Initialize watchdog
         if (cmdLine.isWatchDogEnabled())
-            TCU_CHECK_INTERNAL(m_watchDog = qpWatchDog_create(onWatchdogTimeout, this, WATCHDOG_TOTAL_TIME_LIMIT_SECS,
-                                                              WATCHDOG_INTERVAL_TIME_LIMIT_SECS));
+            TCU_CHECK_INTERNAL(m_watchDog = qpWatchDog_create(onWatchdogTimeout, this, cmdLine.getWatchDogTotalTime(),
+                                                              cmdLine.getWatchDogIntervalTime()));
 
         // Initialize crash handler.
         if (cmdLine.isCrashHandlingEnabled())
@@ -167,12 +175,18 @@ App::App(Platform &platform, Archive &archive, TestLog &log, const CommandLine &
             m_testExecutor = new TestSessionExecutor(*m_testRoot, *m_testCtx);
         else if (runMode == RUNMODE_DUMP_STDOUT_CASELIST)
             writeCaselistsToStdout(*m_testRoot, *m_testCtx);
+        else if (runMode == RUNMODE_DUMP_STDOUT_TRIE)
+            writeCaselistsToStdout(*m_testRoot, *m_testCtx, false, true);
         else if (runMode == RUNMODE_DUMP_XML_CASELIST)
             writeXmlCaselistsToFiles(*m_testRoot, *m_testCtx, cmdLine);
         else if (runMode == RUNMODE_DUMP_TEXT_CASELIST)
             writeTxtCaselistsToFiles(*m_testRoot, *m_testCtx, cmdLine);
+        else if (runMode == RUNMODE_DUMP_TEXT_TRIE)
+            writeTxtCaselistsToFiles(*m_testRoot, *m_testCtx, cmdLine, false, true);
         else if (runMode == RUNMODE_VERIFY_AMBER_COHERENCY)
             verifyAmberCapabilityCoherency(*m_testRoot, *m_testCtx);
+        else if (runMode == RUNMODE_GEN_MUSTPASS)
+            genMustpassFromSpec(*m_testRoot, *m_testCtx, cmdLine);
         else
             DE_ASSERT(false);
     }

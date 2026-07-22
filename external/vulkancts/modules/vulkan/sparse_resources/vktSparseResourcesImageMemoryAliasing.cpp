@@ -181,8 +181,7 @@ ImageSparseMemoryAliasingInstance::ImageSparseMemoryAliasingInstance(Context &co
 
 tcu::TestStatus ImageSparseMemoryAliasingInstance::iterate(void)
 {
-    const float epsilon               = 1e-5f;
-    const InstanceInterface &instance = m_context.getInstanceInterface();
+    const float epsilon = 1e-5f;
 
     {
         // Create logical device supporting both sparse and compute queues
@@ -193,6 +192,7 @@ tcu::TestStatus ImageSparseMemoryAliasingInstance::iterate(void)
         createDeviceSupportingQueues(queueRequirements, formatIsR64(m_format));
     }
 
+    const InstanceInterface &instance      = getInstanceInterface();
     const VkPhysicalDevice physicalDevice  = getPhysicalDevice();
     const tcu::UVec3 maxWorkGroupSize      = tcu::UVec3(128u, 128u, 64u);
     const tcu::UVec3 maxWorkGroupCount     = tcu::UVec3(65535u, 65535u, 65535u);
@@ -260,6 +260,9 @@ tcu::TestStatus ImageSparseMemoryAliasingInstance::iterate(void)
                 if (!checkImageFormatFeatureSupport(instance, physicalDevice, storageFormat,
                                                     VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
                     TCU_THROW(NotSupportedError, "Device does not support storage-compatible format for plane");
+
+                if (storageFormat != planeFormat)
+                    imageSparseInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
             }
         }
         else
@@ -267,6 +270,10 @@ tcu::TestStatus ImageSparseMemoryAliasingInstance::iterate(void)
             if (!checkImageFormatFeatureSupport(instance, physicalDevice, imageSparseInfo.format,
                                                 VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
                 TCU_THROW(NotSupportedError, "Device does not support image format for storage image");
+
+            const VkFormat storageFormat = getStorageCompatibleFormat(imageSparseInfo.format);
+            if (storageFormat != imageSparseInfo.format)
+                imageSparseInfo.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         }
 
         {

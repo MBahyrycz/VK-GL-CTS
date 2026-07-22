@@ -66,6 +66,7 @@
 #include "vktPipelineCreationCacheControlTests.hpp"
 #include "vktPipelineBindPointTests.hpp"
 #include "vktPipelineDerivativeTests.hpp"
+#include "vktPipelinePrimitiveRestartIndexTests.hpp"
 #endif // CTS_USES_VULKANSC
 #include "vktPipelineNoPositionTests.hpp"
 #include "vktPipelineColorWriteEnableTests.hpp"
@@ -78,6 +79,7 @@
 #include "vktPipelineInputAttributeOffsetTests.hpp"
 #include "vktPipelineEmptyFSTests.hpp"
 #include "vktPipelineNoQueuesTests.hpp"
+#include "vktPipelineShaderComponentDecoratedLayoutMatchingTests.hpp"
 #include "vktTestGroupUtil.hpp"
 
 namespace vkt
@@ -214,6 +216,8 @@ void createChildren(tcu::TestCaseGroup *group, PipelineConstructionType pipeline
         group->addChild(createPipelineLibraryTests(testCtx));
         // Monolithic pipeline tests
     }
+    if (isNotExtraShaderObjectVariant)
+        group->addChild(createPrimitiveRestartIndexTests(testCtx, pipelineConstructionType));
 #endif // CTS_USES_VULKANSC
     group->addChild(createEmptyFSTests(testCtx, pipelineConstructionType));
 }

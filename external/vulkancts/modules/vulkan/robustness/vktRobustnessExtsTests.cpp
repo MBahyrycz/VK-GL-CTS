@@ -79,12 +79,7 @@ using RobustnessFeatures = uint32_t;
 template <RobustnessFeatures FEATURES>
 class SingletonDevice
 {
-    SingletonDevice(Context &context)
-        : m_context(context)
-#ifdef CTS_USES_VULKANSC
-        , m_customInstance(createCustomInstanceFromContext(context))
-#endif // CTS_USES_VULKANSC
-        , m_logicalDevice()
+    SingletonDevice(Context &context) : m_context(context), m_instance(context), m_logicalDevice()
     {
         // Note we are already checking the needed features are available in checkSupport().
         VkPhysicalDeviceExtendedDynamicStateFeaturesEXT edsFeatures                      = initVulkanStructure();
@@ -162,34 +157,13 @@ class SingletonDevice
         }
 #endif
 
-        const auto &vki           = m_context.getInstanceInterface();
-        const auto instance       = m_context.getInstance();
-        const auto physicalDevice = chooseDevice(vki, instance, context.getTestContext().getCommandLine());
-
-        vki.getPhysicalDeviceFeatures2(physicalDevice, &features2);
+        m_instance.getDriver().getPhysicalDeviceFeatures2(m_instance.getPhysicalDevice(), &features2);
 
 #ifndef CTS_USES_VULKANSC
         if (FEATURES & RF_PIPELINE_ROBUSTNESS)
             features2.features.robustBufferAccess = VK_FALSE;
 #endif
-        m_logicalDevice = createRobustBufferAccessDevice(context,
-#ifdef CTS_USES_VULKANSC
-                                                         m_customInstance,
-#endif // CTS_USES_VULKANSC
-                                                         &features2);
-
-#ifndef CTS_USES_VULKANSC
-        m_deviceDriver = de::MovePtr<DeviceDriver>(new DeviceDriver(context.getPlatformInterface(), instance,
-                                                                    *m_logicalDevice, context.getUsedApiVersion(),
-                                                                    context.getTestContext().getCommandLine()));
-#else
-        m_deviceDriver = de::MovePtr<DeviceDriverSC, DeinitDeviceDeleter>(
-            new DeviceDriverSC(context.getPlatformInterface(), instance, *m_logicalDevice,
-                               context.getTestContext().getCommandLine(), context.getResourceInterface(),
-                               m_context.getDeviceVulkanSC10Properties(), m_context.getDeviceProperties(),
-                               context.getUsedApiVersion()),
-            vk::DeinitDeviceDeleter(context.getResourceInterface().get(), *m_logicalDevice));
-#endif // CTS_USES_VULKANSC
+        m_logicalDevice = createRobustBufferAccessDevice(context, m_instance, &features2);
     }
 
 public:
@@ -197,19 +171,12 @@ public:
     {
     }
 
-    static VkDevice getDevice(Context &context)
+    static const DeviceWrapper &getDevice(Context &context)
     {
         if (!m_singletonDevice)
             m_singletonDevice = SharedPtr<SingletonDevice>(new SingletonDevice(context));
         DE_ASSERT(m_singletonDevice);
-        return m_singletonDevice->m_logicalDevice.get();
-    }
-    static const DeviceInterface &getDeviceInterface(Context &context)
-    {
-        if (!m_singletonDevice)
-            m_singletonDevice = SharedPtr<SingletonDevice>(new SingletonDevice(context));
-        DE_ASSERT(m_singletonDevice);
-        return *(m_singletonDevice->m_deviceDriver.get());
+        return m_singletonDevice->m_logicalDevice;
     }
 
     static void destroy()
@@ -219,15 +186,8 @@ public:
 
 private:
     const Context &m_context;
-#ifndef CTS_USES_VULKANSC
-    Move<vk::VkDevice> m_logicalDevice;
-    de::MovePtr<vk::DeviceDriver> m_deviceDriver;
-#else
-    // Construction needs to happen in this exact order to ensure proper resource destruction
-    CustomInstance m_customInstance;
-    Move<vk::VkDevice> m_logicalDevice;
-    de::MovePtr<vk::DeviceDriverSC, vk::DeinitDeviceDeleter> m_deviceDriver;
-#endif // CTS_USES_VULKANSC
+    InstanceWrapper m_instance;
+    DeviceWrapper m_logicalDevice;
 
     static SharedPtr<SingletonDevice<FEATURES>> m_singletonDevice;
 };
@@ -274,17 +234,16 @@ PipelineConstructionType getConstructionTypeFromRobustnessCase(PipelineRobustnes
 
 VkFlags getAllShaderStages(tcu::TestContext &testCtx)
 {
-    return testCtx.getCommandLine().isComputeOnly() ?
-               VK_SHADER_STAGE_COMPUTE_BIT :
-               VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    DE_UNREF(testCtx);
+
+    return VK_SHADER_STAGE_ALL;
 }
 
 VkFlags getAllPipelineStages(tcu::TestContext &testCtx)
 {
-    return testCtx.getCommandLine().isComputeOnly() ?
-               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT :
-               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+    DE_UNREF(testCtx);
+
+    return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 }
 
 struct CaseDef
@@ -308,6 +267,7 @@ struct CaseDef
     uint32_t imageDim[3]; // width, height, depth or layers
     bool readOnly;
     bool uses64BitIndexing;
+    bool useComputeQueue;
 
     bool needsScalarBlockLayout() const
     {
@@ -348,7 +308,7 @@ static bool formatIsR64(const VkFormat &f)
 }
 
 // Returns the appropriate singleton device for the given case.
-VkDevice getLogicalDevice(Context &ctx, const bool testRobustness2, const bool testPipelineRobustness)
+const DeviceWrapper &getLogicalDevice(Context &ctx, const bool testRobustness2, const bool testPipelineRobustness)
 {
     if (testPipelineRobustness)
     {
@@ -360,21 +320,6 @@ VkDevice getLogicalDevice(Context &ctx, const bool testRobustness2, const bool t
     if (testRobustness2)
         return Robustness2Singleton::getDevice(ctx);
     return ImageRobustnessSingleton::getDevice(ctx);
-}
-
-// Returns the appropriate singleton device driver for the given case.
-const DeviceInterface &getDeviceInterface(Context &ctx, const bool testRobustness2, const bool testPipelineRobustness)
-{
-    if (testPipelineRobustness)
-    {
-        if (testRobustness2)
-            return PipelineRobustnessRobustness2Singleton::getDeviceInterface(ctx);
-        return PipelineRobustnessImageRobustnessSingleton::getDeviceInterface(ctx);
-    }
-
-    if (testRobustness2)
-        return Robustness2Singleton::getDeviceInterface(ctx);
-    return ImageRobustnessSingleton::getDeviceInterface(ctx);
 }
 
 class Layout
@@ -635,12 +580,12 @@ void RobustnessExtsTestCase::checkSupport(Context &context) const
     case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
     case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
     case VERTEX_ATTRIBUTE_FETCH:
-        if (m_data.testRobustness2)
+        if (m_data.testRobustness2 && !m_data.nullDescriptor)
         {
             if (!robustness2Features.robustBufferAccess2)
                 TCU_THROW(NotSupportedError, "robustBufferAccess2 not supported");
         }
-        else
+        else if (!m_data.nullDescriptor)
         {
             // This case is not tested here.
             DE_ASSERT(false);
@@ -648,12 +593,12 @@ void RobustnessExtsTestCase::checkSupport(Context &context) const
         break;
     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
     case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-        if (m_data.testRobustness2)
+        if (m_data.testRobustness2 && !m_data.nullDescriptor)
         {
             if (!robustness2Features.robustImageAccess2)
                 TCU_THROW(NotSupportedError, "robustImageAccess2 not supported");
         }
-        else
+        else if (!m_data.nullDescriptor)
         {
             if (!imageRobustnessFeatures.robustImageAccess)
                 TCU_THROW(NotSupportedError, "robustImageAccess not supported");
@@ -721,6 +666,20 @@ void RobustnessExtsTestCase::checkSupport(Context &context) const
     if (m_data.uses64BitIndexing && !context.getShader64BitIndexingFeaturesEXT().shader64BitIndexing)
         TCU_THROW(NotSupportedError, "shader64BitIndexing not supported by this implementation");
 #endif
+
+    if (m_data.useComputeQueue && (context.getComputeQueueFamilyIndex() == -1))
+        TCU_THROW(NotSupportedError, "Exclusive compute queue not supported.");
+
+    if ((m_data.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ||
+        m_data.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+    {
+        const VkFormatProperties props =
+            vk::getPhysicalDeviceFormatProperties(vki, context.getPhysicalDevice(), m_data.format);
+        const VkFormatFeatureFlags features = props.optimalTilingFeatures;
+
+        if ((features & (vk::VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | vk::VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) == 0)
+            TCU_THROW(NotSupportedError, "Format not supported for transfer");
+    }
 }
 
 void generateLayout(Layout &layout, const CaseDef &caseDef)
@@ -2006,13 +1965,11 @@ TestInstance *RobustnessExtsTestCase::createInstance(Context &context) const
 
 tcu::TestStatus RobustnessExtsTestInstance::iterate(void)
 {
-    const VkInstance instance    = m_context.getInstance();
-    const InstanceInterface &vki = m_context.getInstanceInterface();
-    const VkDevice device = getLogicalDevice(m_context, m_data.testRobustness2, m_data.needsPipelineRobustness());
-    const vk::DeviceInterface &vk =
-        getDeviceInterface(m_context, m_data.testRobustness2, m_data.needsPipelineRobustness());
-    const VkPhysicalDevice physicalDevice = chooseDevice(vki, instance, m_context.getTestContext().getCommandLine());
-    SimpleAllocator allocator(vk, device, getPhysicalDeviceMemoryProperties(vki, physicalDevice));
+    const DeviceWrapper &device = getLogicalDevice(m_context, m_data.testRobustness2, m_data.needsPipelineRobustness());
+    const vk::InstanceInterface &vki          = device.getInstanceDriver();
+    const vk::VkPhysicalDevice physicalDevice = device.getPhysicalDevice();
+    const vk::DeviceInterface &vk             = device.getDriver();
+    vk::Allocator &allocator                  = device.getAllocator();
 
     Layout layout;
     generateLayout(layout, m_data);
@@ -2123,7 +2080,16 @@ tcu::TestStatus RobustnessExtsTestInstance::iterate(void)
         // Create a buffer to hold data for all descriptors.
         VkDeviceSize size = de::max((VkDeviceSize)(m_data.bufferLen ? m_data.bufferLen : 1), (VkDeviceSize)256);
 
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        VkBufferUsageFlags usage = 0;
+        if ((m_data.stage == STAGE_COMPUTE) || (m_data.stage == STAGE_RAYGEN))
+        {
+            usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        }
+        else
+        {
+            usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        }
+
         if (m_data.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
             m_data.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
         {
@@ -2172,7 +2138,8 @@ tcu::TestStatus RobustnessExtsTestInstance::iterate(void)
         }
     }
 
-    const uint32_t queueFamilyIndex = m_context.getUniversalQueueFamilyIndex();
+    const uint32_t queueFamilyIndex =
+        m_data.useComputeQueue ? m_context.getComputeQueueFamilyIndex() : m_context.getUniversalQueueFamilyIndex();
 
     Move<VkDescriptorSetLayout> descriptorSetLayoutR64;
     Move<VkDescriptorPool> descriptorPoolR64;
@@ -2434,6 +2401,24 @@ tcu::TestStatus RobustnessExtsTestInstance::iterate(void)
 
                 if (m_data.format == VK_FORMAT_R64_UINT)
                     imageViewCreateInfo.format = VK_FORMAT_R32G32_UINT;
+            }
+
+            {
+                const VkImageCreateInfo imgCreateInfo = ((b == 0) ? outputImageCreateInfo : imageCreateInfo);
+                VkImageFormatProperties formatProperties;
+
+                const auto result = vki.getPhysicalDeviceImageFormatProperties(
+                    physicalDevice, imgCreateInfo.format, imgCreateInfo.imageType, imgCreateInfo.tiling,
+                    imgCreateInfo.usage, imgCreateInfo.flags, &formatProperties);
+
+                if (result != VK_SUCCESS)
+                {
+                    if (result == VK_ERROR_FORMAT_NOT_SUPPORTED)
+                        TCU_THROW(NotSupportedError,
+                                  "format " + de::toString(m_data.format) + " does not support the required features");
+                    else
+                        TCU_FAIL("vkGetPhysicalDeviceImageFormatProperties returned unexpected error");
+                }
             }
 
             if (b == 0)
@@ -3355,7 +3340,7 @@ tcu::TestStatus RobustnessExtsTestInstance::iterate(void)
 
     memBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    if (!m_context.getTestContext().getCommandLine().isComputeOnly())
+    if (!m_data.useComputeQueue)
         memBarrier.dstAccessMask |= VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vk.cmdPipelineBarrier(*cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, m_data.allPipelineStages, 0, 1, &memBarrier, 0,
                           nullptr, 0, nullptr);
@@ -3591,12 +3576,10 @@ void OutOfBoundsStrideCase::initPrograms(vk::SourceCollections &programCollectio
 
 tcu::TestStatus OutOfBoundsStrideInstance::iterate(void)
 {
-    const auto &vki           = m_context.getInstanceInterface();
-    const auto physicalDevice = m_context.getPhysicalDevice();
-    const auto &vkd           = getDeviceInterface(m_context, true, m_params.pipelineRobustness);
-    const auto device         = getLogicalDevice(m_context, true, m_params.pipelineRobustness);
-    SimpleAllocator allocator(vkd, device, getPhysicalDeviceMemoryProperties(vki, physicalDevice));
-    const auto qfIndex = m_context.getUniversalQueueFamilyIndex();
+    const auto &device       = getLogicalDevice(m_context, true, m_params.pipelineRobustness);
+    const auto &vkd          = device.getDriver();
+    vk::Allocator &allocator = device.getAllocator();
+    const auto qfIndex       = m_context.getUniversalQueueFamilyIndex();
     const tcu::IVec3 fbDim(8, 8, 1);
     const auto fbExtent    = makeExtent3D(fbDim);
     const auto colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
@@ -3651,6 +3634,7 @@ tcu::TestStatus OutOfBoundsStrideInstance::iterate(void)
     void *vertexBufferPtr   = vertexBufferAlloc.getHostPtr();
 
     deMemcpy(vertexBufferPtr, de::dataOrNull(vertexBufferData), static_cast<size_t>(vertexBufferSize));
+    flushAlloc(vkd, device, vertexBufferAlloc);
 
     // Create the pipeline.
     const auto &binaries  = m_context.getBinaryCollection();
@@ -3785,6 +3769,13 @@ std::string getGPLSuffix(PipelineRobustnessCase prCase)
     return "";
 }
 
+std::string getQueueSufix(uint32_t queue)
+{
+    if (queue)
+        return "_compute";
+    return "";
+}
+
 } // namespace
 
 static void createTests(tcu::TestCaseGroup *group, bool robustness2, bool pipelineRobustness, bool uses64BitIndexing)
@@ -3870,6 +3861,11 @@ static void createTests(tcu::TestCaseGroup *group, bool robustness2, bool pipeli
         // raygen
         {STAGE_RAYGEN, "rgen"},
 #endif
+    };
+
+    TestGroupCase queueCases[] = {
+        {0, ""},
+        {1, "compute"},
     };
 
     TestGroupCase volCases[] = {
@@ -3960,6 +3956,13 @@ static void createTests(tcu::TestCaseGroup *group, bool robustness2, bool pipeli
                                 continue;
                             }
                             if (uses64BitIndexing && descCases[descNdx].count != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                            {
+                                continue;
+                            }
+
+                            // VUID-vkCmdDispatch-SampledType-04472
+                            if (fmtCases[fmtNdx].count == VK_FORMAT_R64_SINT &&
+                                descCases[descNdx].count == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER)
                             {
                                 continue;
                             }
@@ -4144,38 +4147,52 @@ static void createTests(tcu::TestCaseGroup *group, bool robustness2, bool pipeli
 
                                                     for (const auto &pipelineRobustnessCase : pipelineRobustnessCases)
                                                     {
-                                                        CaseDef c = {
-                                                            (VkFormat)fmtCases[fmtNdx].count, // VkFormat format;
-                                                            currentStage,                     // Stage stage;
-                                                            allShaderStages,   // VkFlags allShaderStages;
-                                                            allPipelineStages, // VkFlags allPipelineStages;
-                                                            (int)descCases[descNdx]
-                                                                .count, // VkDescriptorType descriptorType;
-                                                            (VkImageViewType)viewCases[viewNdx]
-                                                                .count, // VkImageViewType viewType;
-                                                            (VkSampleCountFlagBits)sampCases[sampNdx]
-                                                                .count, // VkSampleCountFlagBits samples;
-                                                            (int)lenCases[lenNdx].count,        // int bufferLen;
-                                                            (bool)unrollCases[unrollNdx].count, // bool unroll;
-                                                            (bool)volCases[volNdx].count,       // bool vol;
-                                                            (bool)(lenCases[lenNdx].count ==
-                                                                   ~0U),                    // bool nullDescriptor
-                                                            (bool)tempCases[tempNdx].count, // bool useTemplate
-                                                            (bool)fmtQualCases[fmtQualNdx]
-                                                                .count,                     // bool formatQualifier
-                                                            (bool)pushCases[pushNdx].count, // bool pushDescriptor;
-                                                            (bool)robustness2,              // bool testRobustness2;
-                                                            pipelineRobustnessCase, // PipelineRobustnessCase pipelineRobustnessCase;
-                                                            {imageDim[0], imageDim[1],
-                                                             imageDim[2]}, // uint32_t imageDim[3];
-                                                            (bool)(readOnlyCases[roNdx].count == 1), // bool readOnly;
-                                                            uses64BitIndexing, // bool uses64BitIndexing;
-                                                        };
+                                                        for (int queueNdx = 0;
+                                                             queueNdx < DE_LENGTH_OF_ARRAY(queueCases); queueNdx++)
+                                                        {
+                                                            if (((currentStage != STAGE_COMPUTE) &&
+                                                                 (currentStage != STAGE_RAYGEN)) &&
+                                                                (queueNdx == 1))
+                                                                continue;
 
-                                                        const auto name = stageCases[stageNdx].name +
-                                                                          getGPLSuffix(pipelineRobustnessCase);
-                                                        viewGroup->addChild(
-                                                            new RobustnessExtsTestCase(testCtx, name, c));
+                                                            CaseDef c = {
+                                                                (VkFormat)fmtCases[fmtNdx].count, // VkFormat format;
+                                                                currentStage,                     // Stage stage;
+                                                                allShaderStages,   // VkFlags allShaderStages;
+                                                                allPipelineStages, // VkFlags allPipelineStages;
+                                                                (int)descCases[descNdx]
+                                                                    .count, // VkDescriptorType descriptorType;
+                                                                (VkImageViewType)viewCases[viewNdx]
+                                                                    .count, // VkImageViewType viewType;
+                                                                (VkSampleCountFlagBits)sampCases[sampNdx]
+                                                                    .count, // VkSampleCountFlagBits samples;
+                                                                (int)lenCases[lenNdx].count,        // int bufferLen;
+                                                                (bool)unrollCases[unrollNdx].count, // bool unroll;
+                                                                (bool)volCases[volNdx].count,       // bool vol;
+                                                                (bool)(lenCases[lenNdx].count ==
+                                                                       ~0U),                    // bool nullDescriptor
+                                                                (bool)tempCases[tempNdx].count, // bool useTemplate
+                                                                (bool)fmtQualCases[fmtQualNdx]
+                                                                    .count,                     // bool formatQualifier
+                                                                (bool)pushCases[pushNdx].count, // bool pushDescriptor;
+                                                                (bool)robustness2,              // bool testRobustness2;
+                                                                pipelineRobustnessCase, // PipelineRobustnessCase pipelineRobustnessCase;
+                                                                {imageDim[0], imageDim[1],
+                                                                 imageDim[2]}, // uint32_t imageDim[3];
+                                                                (bool)(readOnlyCases[roNdx].count ==
+                                                                       1),         // bool readOnly;
+                                                                uses64BitIndexing, // bool uses64BitIndexing;
+                                                                (bool)queueCases[queueNdx]
+                                                                    .count, // bool useComputeQueue
+                                                            };
+
+                                                            const auto name = stageCases[stageNdx].name +
+                                                                              getGPLSuffix(pipelineRobustnessCase) +
+                                                                              getQueueSufix(queueCases[queueNdx].count);
+
+                                                            viewGroup->addChild(
+                                                                new RobustnessExtsTestCase(testCtx, name, c));
+                                                        }
                                                     }
                                                 }
                                                 sampGroup->addChild(viewGroup.release());

@@ -288,9 +288,9 @@ struct CaseDef
         /* Stub */
     }
 
-    CaseDef(const TestType &inType)
+    CaseDef(const TestType &inType, const GeometryType &inGeometryType)
         : type(inType)
-        , geometryType(GeometryType::COUNT)
+        , geometryType(inGeometryType)
         , asLayout(AccelerationStructureLayout::COUNT)
     {
         /* Stub */
@@ -8188,8 +8188,8 @@ de::MovePtr<BufferWithMemory> RayTracingMiscTestInstance::runTest(void)
     auto missShaderBindingTablePtr = de::MovePtr<BufferWithMemory>();
     if (nMissGroups > 0u)
     {
-        const void *missShaderBindingGroupShaderRecordDataPtr =
-            m_testPtr->getShaderRecordData(ShaderGroups::MISS_GROUP);
+        const void *missRecordData = m_testPtr->getShaderRecordData(ShaderGroups::MISS_GROUP);
+        const std::vector<const void *> missShaderGroupDataPtrs(nMissGroups, missRecordData);
         missShaderBindingTablePtr = rayTracingPipelinePtr->createShaderBindingTable(
             deviceInterface, deviceVk, *pipelineVkPtr, allocator, m_rayTracingPropsPtr->getShaderGroupHandleSize(),
             m_rayTracingPropsPtr->getShaderGroupBaseAlignment(), missGroupIndex,
@@ -8198,14 +8198,16 @@ de::MovePtr<BufferWithMemory> RayTracingMiscTestInstance::runTest(void)
             0u,                         /* additionalBufferUsageFlags  */
             MemoryRequirement::Any, 0u, /* opaqueCaptureAddress       */
             0u,                         /* shaderBindingTableOffset   */
-            m_testPtr->getShaderRecordSize(ShaderGroups::MISS_GROUP), &missShaderBindingGroupShaderRecordDataPtr);
+            m_testPtr->getShaderRecordSize(ShaderGroups::MISS_GROUP),
+            const_cast<const void **>(missShaderGroupDataPtrs.data()));
     }
 
     auto hitShaderBindingTablePtr = de::MovePtr<BufferWithMemory>();
     if (nHitGroups > 0u)
     {
-        const void *hitShaderBindingGroupShaderRecordDataPtr = m_testPtr->getShaderRecordData(ShaderGroups::HIT_GROUP);
-        hitShaderBindingTablePtr                             = rayTracingPipelinePtr->createShaderBindingTable(
+        const void *hitRecordData = m_testPtr->getShaderRecordData(ShaderGroups::HIT_GROUP);
+        const std::vector<const void *> hitShaderGroupDataPtrs(nHitGroups, hitRecordData);
+        hitShaderBindingTablePtr = rayTracingPipelinePtr->createShaderBindingTable(
             deviceInterface, deviceVk, *pipelineVkPtr, allocator, m_rayTracingPropsPtr->getShaderGroupHandleSize(),
             m_rayTracingPropsPtr->getShaderGroupBaseAlignment(), hitGroupIndex,
             nHitGroups,                 /* groupCount                  */
@@ -8213,7 +8215,8 @@ de::MovePtr<BufferWithMemory> RayTracingMiscTestInstance::runTest(void)
             0u,                         /* additionalBufferUsageFlags  */
             MemoryRequirement::Any, 0u, /* opaqueCaptureAddress       */
             0u,                         /* shaderBindingTableOffset   */
-            m_testPtr->getShaderRecordSize(ShaderGroups::HIT_GROUP), &hitShaderBindingGroupShaderRecordDataPtr);
+            m_testPtr->getShaderRecordSize(ShaderGroups::HIT_GROUP),
+            const_cast<const void **>(hitShaderGroupDataPtrs.data()));
     }
 
     {
@@ -8424,11 +8427,6 @@ void checkRTPipelineSupport(Context &context)
 }
 
 void checkReuseCreationBufferSupport(Context &context, bool)
-{
-    checkRTPipelineSupport(context);
-}
-
-void checkReuseScratchBufferSupport(Context &context)
 {
     checkRTPipelineSupport(context);
 }
@@ -9947,6 +9945,688 @@ tcu::TestStatus updateEmptyTopASInstance(Context &context)
     return tcu::TestStatus::pass("Pass");
 }
 
+// Each shader type will have a slot assigned in the output buffer, and in the end all shaders must have been invoked.
+// We'll trace two rays, one of them hitting an AABB and another one missing it.
+void initShadersFromLibPrograms(vk::SourceCollections &dst)
+{
+    const vk::ShaderBuildOptions buildOptions(dst.usedVulkanVersion, SPIRV_VERSION_1_4, 0u, true);
+
+    std::ostringstream rgen;
+    rgen << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "layout (location=0) rayPayloadEXT vec4 unusedPayload;\n"
+         << "layout (location=0) callableDataEXT vec4 unusedCallableData;\n"
+         << "layout (set=0, binding=0) uniform accelerationStructureEXT topLevelAS;\n"
+         << "layout (set=0, binding=1, std430) buffer OutputBuffer { uint val[]; } outBuffer;\n"
+         << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "    uint  invocationId = gl_LaunchIDEXT.z * gl_LaunchSizeEXT.x * gl_LaunchSizeEXT.y + gl_LaunchIDEXT.y * "
+            "gl_LaunchSizeEXT.x + gl_LaunchIDEXT.x;\n"
+         << "    float zDirection   = 1.0 + float(invocationId % 2) * (-2.0); // 1.0 or -1.0\n"
+         << "\n"
+         << "    uint  rayFlags  = 0u;\n"
+         << "    uint  cullMask  = 0xFFu;\n"
+         << "    uint  sbtOffset = 0u;\n"
+         << "    uint  sbtStride = 0u;\n"
+         << "    uint  missIndex = 0u;\n"
+         << "    float tmin      = 0.0;\n"
+         << "    float tmax      = 9.0;\n"
+         << "    vec3  origin    = vec3(0.0, 0.0, 0.0);\n"
+         << "    vec3  direct    = vec3(0.0, 0.0, zDirection);\n"
+         << "\n"
+         << "    outBuffer.val[0] = 1u;\n"
+         << "    traceRayEXT(topLevelAS, rayFlags, cullMask, sbtOffset, sbtStride, missIndex, origin, tmin, direct, "
+            "tmax, 0);\n"
+         << "\n"
+         << "    executeCallableEXT(0u, 0);\n"
+         << "}\n";
+    dst.glslSources.add("rgen") << glu::RaygenSource(rgen.str()) << buildOptions;
+
+    std::ostringstream isec;
+    isec << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "hitAttributeEXT vec4 unusedHitAttribute;\n"
+         << "layout (set=0, binding=1) buffer OutputBuffer { uint val[]; } outBuffer;\n"
+         << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "    outBuffer.val[1] = 1u;\n"
+         << "    reportIntersectionEXT(1.0f, 0u);\n"
+         << "}\n";
+    dst.glslSources.add("isec") << glu::IntersectionSource(isec.str()) << buildOptions;
+
+    std::ostringstream ahit;
+    ahit << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "hitAttributeEXT vec4 unusedHitAttribute;\n"
+         << "layout (location=0) rayPayloadInEXT vec4 unusedPayload;\n"
+         << "layout (set=0, binding=1) buffer OutputBuffer { uint val[]; } outBuffer;\n"
+         << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "    outBuffer.val[2] = 1u;\n"
+         << "}\n";
+    dst.glslSources.add("ahit") << glu::AnyHitSource(ahit.str()) << buildOptions;
+
+    std::ostringstream chit;
+    chit << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "hitAttributeEXT vec4 unusedHitAttribute;\n"
+         << "layout (location=0) rayPayloadInEXT vec4 unusedPayloadIn;\n"
+         << "layout (set=0, binding=1) buffer OutputBuffer { uint val[]; } outBuffer;\n"
+         << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "    outBuffer.val[3] = 1u;\n"
+         << "}\n";
+    dst.glslSources.add("chit") << glu::ClosestHitSource(chit.str()) << buildOptions;
+
+    std::ostringstream miss;
+    miss << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "layout (location=0) rayPayloadInEXT vec4 unusedPayloadIn;\n"
+         << "layout (set=0, binding=1) buffer OutputBuffer { uint val[]; } outBuffer;\n"
+         << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "    outBuffer.val[4] = 1u;\n"
+         << "}\n";
+    dst.glslSources.add("miss") << glu::MissSource(miss.str()) << buildOptions;
+
+    std::ostringstream call;
+    call << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "layout (location=0) callableDataInEXT vec4 unusedCallableData;\n"
+         << "layout (set=0, binding=1) buffer OutputBuffer { uint val[]; } outBuffer;\n"
+         << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "    outBuffer.val[5] = 1u;\n"
+         << "}\n";
+    dst.glslSources.add("call") << glu::CallableSource(call.str()) << buildOptions;
+}
+
+tcu::TestStatus shadersFromLibInstance(Context &context)
+{
+    const auto ctx = context.getContextCommonData();
+    const auto stages =
+        (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+         VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR);
+
+    // Command pool and buffer.
+    const auto cmdPool = makeCommandPool(ctx.vkd, ctx.device, ctx.qfIndex);
+    const auto cmdBufferPtr =
+        allocateCommandBuffer(ctx.vkd, ctx.device, cmdPool.get(), VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+    const auto cmdBuffer = cmdBufferPtr.get();
+
+    beginCommandBuffer(ctx.vkd, cmdBuffer);
+
+    // Build acceleration structures.
+    auto topLevelAS    = makeTopLevelAccelerationStructure();
+    auto bottomLevelAS = makeBottomLevelAccelerationStructure();
+
+    AccelerationStructBufferProperties bufferProps;
+    bufferProps.props.residency = ResourceResidency::TRADITIONAL;
+
+    // AABB from -1,-1 to 1,1 at Z = 1. Note rays are traced from (0,0,0) in Z=1 or Z=-1 direction for hits or misses.
+    std::vector<tcu::Vec3> aabb;
+    aabb.reserve(4u);
+    // clang-format off
+    aabb.emplace_back(-1.0f, -1.0f, 1.0f);
+    aabb.emplace_back( 1.0f,  1.0f, 1.0f);
+    // clang-format on
+    bottomLevelAS->addGeometry(aabb, false /*triangles*/);
+    bottomLevelAS->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    de::SharedPtr<BottomLevelAccelerationStructure> blasSharedPtr(bottomLevelAS.release());
+    topLevelAS->setInstanceCount(1);
+    topLevelAS->addInstance(blasSharedPtr);
+    topLevelAS->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    // Create output buffer.
+    constexpr uint32_t kValueCount = 6u; // One for each of the shading stages.
+    std::vector<uint32_t> bufferValues(kValueCount, 0u);
+    const auto bufferSize       = static_cast<VkDeviceSize>(de::dataSize(bufferValues));
+    const auto bufferCreateInfo = makeBufferCreateInfo(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    BufferWithMemory buffer(ctx.vkd, ctx.device, ctx.allocator, bufferCreateInfo, HostIntent::RW);
+    auto &bufferAlloc = buffer.getAllocation();
+
+    // Fill output buffer with initial values.
+    memcpy(bufferAlloc.getHostPtr(), de::dataOrNull(bufferValues), de::dataSize(bufferValues));
+    flushAlloc(ctx.vkd, ctx.device, bufferAlloc);
+
+    // Descriptor set layout and pipeline layout.
+    DescriptorSetLayoutBuilder setLayoutBuilder;
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, stages);
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stages);
+
+    const auto setLayout      = setLayoutBuilder.build(ctx.vkd, ctx.device);
+    const auto pipelineLayout = makePipelineLayout(ctx.vkd, ctx.device, setLayout.get());
+
+    // Descriptor pool and set.
+    DescriptorPoolBuilder poolBuilder;
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    const auto descriptorPool =
+        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u);
+    const auto descriptorSet = makeDescriptorSet(ctx.vkd, ctx.device, descriptorPool.get(), setLayout.get());
+
+    // Update descriptor set.
+    {
+        const VkWriteDescriptorSetAccelerationStructureKHR accelDescInfo = {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            nullptr,
+            1u,
+            topLevelAS.get()->getPtr(),
+        };
+
+        const auto bufferDescInfo = makeDescriptorBufferInfo(buffer.get(), 0ull, VK_WHOLE_SIZE);
+
+        DescriptorSetUpdateBuilder updateBuilder;
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(0u),
+                                  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, &accelDescInfo);
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(1u),
+                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bufferDescInfo);
+        updateBuilder.update(ctx.vkd, ctx.device);
+    }
+
+    // Shader modules.
+    const auto &binaries = context.getBinaryCollection();
+    auto rgenModule      = createShaderModule(ctx.vkd, ctx.device, binaries.get("rgen"));
+    auto isecModule      = createShaderModule(ctx.vkd, ctx.device, binaries.get("isec"));
+    auto ahitModule      = createShaderModule(ctx.vkd, ctx.device, binaries.get("ahit"));
+    auto chitModule      = createShaderModule(ctx.vkd, ctx.device, binaries.get("chit"));
+    auto missModule      = createShaderModule(ctx.vkd, ctx.device, binaries.get("miss"));
+    auto callModule      = createShaderModule(ctx.vkd, ctx.device, binaries.get("call"));
+
+    // Get some ray tracing properties.
+    const auto rayTracingPropertiesKHR = makeRayTracingProperties(ctx.vki, ctx.physicalDevice);
+    const auto shaderGroupHandleSize   = rayTracingPropertiesKHR->getShaderGroupHandleSize();
+
+    // Create raytracing pipeline and shader binding tables. We'll split shaders into two libraries.
+    Move<VkPipeline> pipelineLibrary0;
+    Move<VkPipeline> pipelineLibrary1;
+    Move<VkPipeline> pipeline;
+
+    de::MovePtr<BufferWithMemory> rgenSBT;
+    de::MovePtr<BufferWithMemory> xhitSBT;
+    de::MovePtr<BufferWithMemory> missSBT;
+    de::MovePtr<BufferWithMemory> callSBT;
+
+    VkStridedDeviceAddressRegionKHR rgenSBTRegion = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    VkStridedDeviceAddressRegionKHR xhitSBTRegion = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    VkStridedDeviceAddressRegionKHR missSBTRegion = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    VkStridedDeviceAddressRegionKHR callSBTRegion = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+
+    const auto interfaceSize = DE_SIZEOF32(tcu::Vec4); // Size of payloads and hit attributes.
+
+    {
+        const std::vector<VkPipelineShaderStageCreateInfo> shaderStages{
+            VkPipelineShaderStageCreateInfo{
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0u,
+                VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+                *rgenModule,
+                "main",
+                nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0u,
+                VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+                *isecModule,
+                "main",
+                nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0u,
+                VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+                *ahitModule,
+                "main",
+                nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0u,
+                VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
+                *chitModule,
+                "main",
+                nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0u,
+                VK_SHADER_STAGE_MISS_BIT_KHR,
+                *missModule,
+                "main",
+                nullptr,
+            },
+            VkPipelineShaderStageCreateInfo{
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0u,
+                VK_SHADER_STAGE_CALLABLE_BIT_KHR,
+                *callModule,
+                "main",
+                nullptr,
+            },
+        };
+
+        const auto shaderCount     = de::sizeU32(shaderStages);
+        const auto halfShaderCount = shaderCount / 2u;
+
+        const VkRayTracingPipelineInterfaceCreateInfoKHR libraryInterface = {
+            VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_INTERFACE_CREATE_INFO_KHR,
+            nullptr,
+            interfaceSize,
+            interfaceSize,
+        };
+
+        VkRayTracingPipelineCreateInfoKHR pipelineLibCreateInfo = {
+            VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+            nullptr,
+            VK_PIPELINE_CREATE_LIBRARY_BIT_KHR,
+            halfShaderCount,
+            de::dataOrNull(shaderStages),
+            0u,
+            nullptr,
+            10u,
+            nullptr,
+            &libraryInterface,
+            nullptr,
+            *pipelineLayout,
+            VK_NULL_HANDLE,
+            -1,
+        };
+
+        // The libraries will contain all shaders, but no groups.
+        pipelineLibrary0 =
+            createRayTracingPipelineKHR(ctx.vkd, ctx.device, VK_NULL_HANDLE, VK_NULL_HANDLE, &pipelineLibCreateInfo);
+
+        pipelineLibCreateInfo.pStages += pipelineLibCreateInfo.stageCount;
+        pipelineLibCreateInfo.stageCount = shaderCount - halfShaderCount;
+
+        pipelineLibrary1 =
+            createRayTracingPipelineKHR(ctx.vkd, ctx.device, VK_NULL_HANDLE, VK_NULL_HANDLE, &pipelineLibCreateInfo);
+
+        const std::vector<VkRayTracingShaderGroupCreateInfoKHR> shaderGroups{
+            VkRayTracingShaderGroupCreateInfoKHR{
+                VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                nullptr,
+                VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+                0u,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                nullptr,
+            },
+            VkRayTracingShaderGroupCreateInfoKHR{
+                VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                nullptr,
+                VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR,
+                VK_SHADER_UNUSED_KHR,
+                3u,
+                2u,
+                1u,
+                nullptr,
+            },
+            VkRayTracingShaderGroupCreateInfoKHR{
+                VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                nullptr,
+                VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+                4u,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                nullptr,
+            },
+            VkRayTracingShaderGroupCreateInfoKHR{
+                VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+                nullptr,
+                VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+                5u,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                VK_SHADER_UNUSED_KHR,
+                nullptr,
+            },
+        };
+
+        const std::vector<VkPipeline> libraries{
+            *pipelineLibrary0,
+            *pipelineLibrary1,
+        };
+
+        const VkPipelineLibraryCreateInfoKHR libraryInfo = {
+            VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
+            nullptr,
+            de::sizeU32(libraries),
+            de::dataOrNull(libraries),
+        };
+
+        const VkRayTracingPipelineCreateInfoKHR pipelineCreateInfo = {
+            VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+            nullptr,
+            0u,
+            0u,
+            nullptr,
+            de::sizeU32(shaderGroups),
+            de::dataOrNull(shaderGroups),
+            10u,
+            &libraryInfo,
+            &libraryInterface,
+            nullptr,
+            *pipelineLayout,
+            VK_NULL_HANDLE,
+            -1,
+        };
+
+        // The final pipeline will have no shaders itself, taking them from the library, and will create the groups.
+        pipeline =
+            createRayTracingPipelineKHR(ctx.vkd, ctx.device, VK_NULL_HANDLE, VK_NULL_HANDLE, &pipelineCreateInfo);
+
+        const auto shaderGroupCount = de::sizeU32(shaderGroups);
+        const auto totalHandleSize  = shaderGroupHandleSize * shaderGroupCount;
+        std::vector<uint8_t> shaderGroupHandles(totalHandleSize, 0);
+
+        VK_CHECK(ctx.vkd.getRayTracingShaderGroupHandlesKHR(ctx.device, *pipeline, 0u, de::sizeU32(shaderGroups),
+                                                            de::dataSize(shaderGroupHandles),
+                                                            de::dataOrNull(shaderGroupHandles)));
+
+        // Each SBT will contain a single shader group handle.
+        const auto sbtSize = static_cast<VkDeviceSize>(shaderGroupHandleSize);
+        const auto sbtUsage =
+            (VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        const auto sbtCreateInfo = makeBufferCreateInfo(sbtSize, sbtUsage);
+
+        const auto makeSBTAndRegion =
+            [&](de::MovePtr<BufferWithMemory> &sbt, VkStridedDeviceAddressRegionKHR &region, uint32_t groupIndex)
+        {
+            // Allocate buffer.
+            sbt = de::MovePtr<BufferWithMemory>(new BufferWithMemory(ctx.vkd, ctx.device, ctx.allocator, sbtCreateInfo,
+                                                                     HostIntent::W, true,
+                                                                     VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT));
+
+            // Copy handle.
+            auto &alloc = sbt->getAllocation();
+            memcpy(alloc.getHostPtr(), shaderGroupHandles.data() + groupIndex * shaderGroupHandleSize,
+                   shaderGroupHandleSize);
+            flushAlloc(ctx.vkd, ctx.device, alloc);
+
+            // Prepare region.
+            auto sbtAddress = getBufferDeviceAddress(ctx.vkd, ctx.device, sbt->get(), 0ull);
+            region          = makeStridedDeviceAddressRegionKHR(sbtAddress, shaderGroupHandleSize, sbtSize);
+        };
+
+        makeSBTAndRegion(rgenSBT, rgenSBTRegion, 0u);
+        makeSBTAndRegion(xhitSBT, xhitSBTRegion, 1u);
+        makeSBTAndRegion(missSBT, missSBTRegion, 2u);
+        makeSBTAndRegion(callSBT, callSBTRegion, 3u);
+    }
+
+    // Trace rays.
+    ctx.vkd.cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipeline.get());
+    ctx.vkd.cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pipelineLayout.get(), 0u, 1u,
+                                  &descriptorSet.get(), 0u, nullptr);
+    ctx.vkd.cmdTraceRaysKHR(cmdBuffer, &rgenSBTRegion, &missSBTRegion, &xhitSBTRegion, &callSBTRegion, 2u, 1u, 1u);
+
+    // Barrier for the output buffer.
+    const auto bufferBarrier = makeMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    ctx.vkd.cmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_HOST_BIT, 0u,
+                               1u, &bufferBarrier, 0u, nullptr, 0u, nullptr);
+
+    endCommandBuffer(ctx.vkd, cmdBuffer);
+    submitCommandsAndWait(ctx.vkd, ctx.device, ctx.queue, cmdBuffer);
+
+    // Check all stages wrote something.
+    invalidateAlloc(ctx.vkd, ctx.device, bufferAlloc);
+    memcpy(de::dataOrNull(bufferValues), bufferAlloc.getHostPtr(), de::dataSize(bufferValues));
+
+    const uint32_t ref = 1u;
+    auto &log          = context.getTestContext().getLog();
+    bool fail          = false;
+
+    for (size_t i = 0; i < bufferValues.size(); ++i)
+    {
+        const auto &res = bufferValues.at(i);
+        if (res != ref)
+        {
+            fail = true;
+            std::ostringstream msg;
+            msg << "Unexpected value in output buffer at position " << i << ": expected " << ref << " but found "
+                << res;
+            log << tcu::TestLog::Message << msg.str() << tcu::TestLog::EndMessage;
+        }
+    }
+
+    if (fail)
+        TCU_FAIL("Unexpected values in output buffer; check log for details --");
+
+    return tcu::TestStatus::pass("Pass");
+}
+
+void initFlipFacingPrograms(vk::SourceCollections &dst)
+{
+    const vk::ShaderBuildOptions buildOptions(dst.usedVulkanVersion, vk::SPIRV_VERSION_1_4, 0u, true);
+
+    const std::string bindings = "layout(set=0, binding=0) uniform accelerationStructureEXT topLevelAS;\n"
+                                 "layout(set=0, binding=1) buffer OutputBuffer { uint val; } outBuffer;\n";
+
+    std::ostringstream rgen;
+    rgen << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "layout (location=0) rayPayloadEXT vec3 unused;\n"
+         << bindings << "\n"
+         << "void main()\n"
+         << "{\n"
+         << "  uint  rayFlags = gl_RayFlagsCullBackFacingTrianglesEXT;\n"
+         << "  uint  cullMask = 0xFFu;\n"
+         << "  float tmin     = 0.0;\n"
+         << "  float tmax     = 9.0;\n"
+         << "  vec3  origin   = vec3(0.0, 0.0, 0.0);\n"
+         << "  vec3  direct   = vec3(0.0, 0.0, 1.0);\n"
+         << "  outBuffer.val  = 0u;\n"
+         << "  traceRayEXT(topLevelAS, rayFlags, cullMask, 0, 0, 0, origin, tmin, direct, tmax, 0);\n"
+         << "}\n";
+    dst.glslSources.add("rgen") << glu::RaygenSource(rgen.str()) << buildOptions;
+
+    std::ostringstream ahit;
+    ahit << "#version 460 core\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "hitAttributeEXT vec3 unusedAttribute;\n"
+         << "layout (location=0) rayPayloadInEXT vec3 unusedPayload;\n"
+         << bindings << "void main()\n"
+         << "{\n"
+         << "  atomicAdd(outBuffer.val, 1u);\n"
+         << "  ignoreIntersectionEXT;\n"
+         << "}\n";
+    dst.glslSources.add("ahit") << glu::AnyHitSource(ahit.str()) << buildOptions;
+
+    std::ostringstream miss;
+    miss << "#version 460\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "layout (location=0) rayPayloadInEXT vec3 unused;\n"
+         << "void main() {}\n";
+    dst.glslSources.add("miss") << glu::MissSource(miss.str()) << buildOptions;
+}
+
+tcu::TestStatus flipFacingPreserveInstance(Context &context)
+{
+    const auto ctx = context.getContextCommonData();
+    const auto stages =
+        (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR);
+
+    // Command pool and buffer.
+    CommandPoolWithBuffer cmd(ctx.vkd, ctx.device, ctx.qfIndex);
+    const auto cmdBuffer = *cmd.cmdBuffer;
+
+    // Build acceleration structures.
+    auto topLevelAS    = makeTopLevelAccelerationStructure();
+    auto bottomLevelAS = makeBottomLevelAccelerationStructure();
+
+    const std::vector<float> zPos{5.0f, 6.0f};
+    std::vector<tcu::Vec3> triangles;
+    triangles.reserve(3 * zPos.size());
+    for (const float z : zPos)
+    {
+        // clang-format off
+        triangles.emplace_back(-1.0f, -1.0f, z);
+        triangles.emplace_back( 1.0f, -1.0f, z);
+        triangles.emplace_back( 0.0f,  1.0f, z);
+        // clang-format on
+    }
+
+    bottomLevelAS->addGeometry(triangles, true /*triangles*/);
+
+    AccelerationStructBufferProperties bufferProps;
+    bufferProps.useExternalBuffer = false;
+    bufferProps.props.residency   = ResourceResidency::TRADITIONAL;
+
+    beginCommandBuffer(ctx.vkd, cmdBuffer);
+    bottomLevelAS->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    using SharedBottomPtr = de::SharedPtr<BottomLevelAccelerationStructure>;
+    SharedBottomPtr blasSharedPtr(bottomLevelAS.release());
+
+    topLevelAS->setInstanceCount(1);
+    const auto instanceFlags =
+        static_cast<VkGeometryInstanceFlagsKHR>(VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR);
+    topLevelAS->addInstance(blasSharedPtr, identityMatrix3x4, 0u, 0xFFu, 0u, instanceFlags);
+    topLevelAS->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    // Create output buffer.
+    const auto bufferSize       = static_cast<VkDeviceSize>(sizeof(uint32_t));
+    const auto bufferCreateInfo = makeBufferCreateInfo(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    BufferWithMemory buffer(ctx.vkd, ctx.device, ctx.allocator, bufferCreateInfo, HostIntent::RW);
+    {
+        auto &alloc = buffer.getAllocation();
+        memset(alloc.getHostPtr(), 0xFF, sizeof(uint32_t));
+        flushAlloc(ctx.vkd, ctx.device, alloc);
+    }
+
+    // Descriptor set layout and pipeline layout.
+    DescriptorSetLayoutBuilder setLayoutBuilder;
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, stages);
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stages);
+
+    const auto setLayout      = setLayoutBuilder.build(ctx.vkd, ctx.device);
+    const auto pipelineLayout = makePipelineLayout(ctx.vkd, ctx.device, setLayout.get());
+
+    // Descriptor pool and set.
+    DescriptorPoolBuilder poolBuilder;
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    const auto descriptorPool =
+        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u);
+    const auto descriptorSet = makeDescriptorSet(ctx.vkd, ctx.device, descriptorPool.get(), setLayout.get());
+
+    // Update descriptor set.
+    {
+        const VkWriteDescriptorSetAccelerationStructureKHR accelDescInfo = {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            nullptr,
+            1u,
+            topLevelAS.get()->getPtr(),
+        };
+
+        const auto bufferDescInfo = makeDescriptorBufferInfo(buffer.get(), 0ull, VK_WHOLE_SIZE);
+
+        DescriptorSetUpdateBuilder updateBuilder;
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(0u),
+                                  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, &accelDescInfo);
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(1u),
+                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bufferDescInfo);
+        updateBuilder.update(ctx.vkd, ctx.device);
+    }
+
+    // Shader modules.
+    auto rgenModule = createShaderModule(ctx.vkd, ctx.device, context.getBinaryCollection().get("rgen"), 0);
+    auto ahitModule = createShaderModule(ctx.vkd, ctx.device, context.getBinaryCollection().get("ahit"), 0);
+    auto missModule = createShaderModule(ctx.vkd, ctx.device, context.getBinaryCollection().get("miss"), 0);
+
+    // Get some ray tracing properties.
+    const auto rayTracingPropertiesKHR  = makeRayTracingProperties(ctx.vki, ctx.physicalDevice);
+    const auto shaderGroupHandleSize    = rayTracingPropertiesKHR->getShaderGroupHandleSize();
+    const auto shaderGroupBaseAlignment = rayTracingPropertiesKHR->getShaderGroupBaseAlignment();
+
+    // Create raytracing pipeline and shader binding tables.
+    Move<VkPipeline> pipeline;
+
+    de::MovePtr<BufferWithMemory> raygenSBT;
+    de::MovePtr<BufferWithMemory> missSBT;
+    de::MovePtr<BufferWithMemory> hitSBT;
+    de::MovePtr<BufferWithMemory> callableSBT;
+
+    VkStridedDeviceAddressRegionKHR raygenSBTRegion   = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    VkStridedDeviceAddressRegionKHR missSBTRegion     = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    VkStridedDeviceAddressRegionKHR hitSBTRegion      = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+    VkStridedDeviceAddressRegionKHR callableSBTRegion = makeStridedDeviceAddressRegionKHR(0, 0, 0);
+
+    {
+        const auto rayTracingPipeline = de::newMovePtr<RayTracingPipeline>();
+
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_RAYGEN_BIT_KHR, rgenModule, 0u);
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_MISS_BIT_KHR, missModule, 1u);
+        rayTracingPipeline->addShader(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, ahitModule, 2u);
+
+        pipeline = rayTracingPipeline->createPipeline(ctx.vkd, ctx.device, pipelineLayout.get());
+
+        raygenSBT = rayTracingPipeline->createShaderBindingTable(
+            ctx.vkd, ctx.device, *pipeline, ctx.allocator, shaderGroupHandleSize, shaderGroupBaseAlignment, 0u, 1u);
+
+        const auto rayGenBDA = getBufferDeviceAddress(ctx.vkd, ctx.device, raygenSBT->get(), 0ull);
+        raygenSBTRegion = makeStridedDeviceAddressRegionKHR(rayGenBDA, shaderGroupHandleSize, shaderGroupHandleSize);
+
+        missSBT = rayTracingPipeline->createShaderBindingTable(ctx.vkd, ctx.device, *pipeline, ctx.allocator,
+                                                               shaderGroupHandleSize, shaderGroupBaseAlignment, 1u, 1u);
+
+        const auto missBDA = getBufferDeviceAddress(ctx.vkd, ctx.device, missSBT->get(), 0ull);
+        missSBTRegion      = makeStridedDeviceAddressRegionKHR(missBDA, shaderGroupHandleSize, shaderGroupHandleSize);
+
+        hitSBT = rayTracingPipeline->createShaderBindingTable(ctx.vkd, ctx.device, *pipeline, ctx.allocator,
+                                                              shaderGroupHandleSize, shaderGroupBaseAlignment, 2u, 1u);
+
+        const auto hitBDA = getBufferDeviceAddress(ctx.vkd, ctx.device, hitSBT->get(), 0ull);
+        hitSBTRegion      = makeStridedDeviceAddressRegionKHR(hitBDA, shaderGroupHandleSize, shaderGroupHandleSize);
+    }
+
+    // Trace rays.
+    ctx.vkd.cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, *pipeline);
+    ctx.vkd.cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, *pipelineLayout, 0u, 1u,
+                                  &descriptorSet.get(), 0u, nullptr);
+    ctx.vkd.cmdTraceRaysKHR(cmdBuffer, &raygenSBTRegion, &missSBTRegion, &hitSBTRegion, &callableSBTRegion, 1u, 1u, 1u);
+
+    // Barrier for the output buffer.
+    const auto bufferBarrier = makeMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    ctx.vkd.cmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_HOST_BIT, 0u,
+                               1u, &bufferBarrier, 0u, nullptr, 0u, nullptr);
+
+    endCommandBuffer(ctx.vkd, cmdBuffer);
+    submitCommandsAndWait(ctx.vkd, ctx.device, ctx.queue, cmdBuffer);
+
+    // Read value back from the buffer.
+    uint32_t bufferValue = 0xFFu;
+    invalidateAlloc(ctx.vkd, ctx.device, buffer.getAllocation());
+    memcpy(&bufferValue, buffer.getAllocation().getHostPtr(), sizeof(bufferValue));
+
+    const auto expected = de::sizeU32(zPos);
+    if (bufferValue != expected)
+    {
+        std::ostringstream msg;
+        msg << "Unexpected value found in buffer: expected " << expected << " but found " << bufferValue;
+        TCU_FAIL(msg.str());
+    }
+
+    return tcu::TestStatus::pass("Pass");
+}
+
 } // namespace
 
 class RayTracingTestCase : public TestCase
@@ -10588,72 +11268,72 @@ tcu::TestCaseGroup *createMiscTests(tcu::TestContext &testCtx)
 
     {
         // Tests usage of various variables inside a shader record block using std430 layout
-        auto newTestCaseSTD430_1Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordSTD430_1", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_1));
-        auto newTestCaseSTD430_2Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordSTD430_2", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_2));
-        auto newTestCaseSTD430_3Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordSTD430_3", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_3));
-        auto newTestCaseSTD430_4Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordSTD430_4", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_4));
-        auto newTestCaseSTD430_5Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordSTD430_5", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_5));
-        auto newTestCaseSTD430_6Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordSTD430_6", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_6));
+        auto newTestCaseSTD430_1Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordSTD430_1", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_1, GeometryType::AABB));
+        auto newTestCaseSTD430_2Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordSTD430_2", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_2, GeometryType::AABB));
+        auto newTestCaseSTD430_3Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordSTD430_3", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_3, GeometryType::AABB));
+        auto newTestCaseSTD430_4Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordSTD430_4", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_4, GeometryType::AABB));
+        auto newTestCaseSTD430_5Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordSTD430_5", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_5, GeometryType::AABB));
+        auto newTestCaseSTD430_6Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordSTD430_6", CaseDef(TestType::SHADER_RECORD_BLOCK_STD430_6, GeometryType::AABB));
 
         // Tests usage of various variables inside a shader record block using scalar layout
-        auto newTestCaseScalar_1Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordScalar_1", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_1));
-        auto newTestCaseScalar_2Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordScalar_2", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_2));
-        auto newTestCaseScalar_3Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordScalar_3", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_3));
-        auto newTestCaseScalar_4Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordScalar_4", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_4));
-        auto newTestCaseScalar_5Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordScalar_5", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_5));
-        auto newTestCaseScalar_6Ptr =
-            new RayTracingTestCase(testCtx, "shaderRecordScalar_6", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_6));
+        auto newTestCaseScalar_1Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordScalar_1", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_1, GeometryType::AABB));
+        auto newTestCaseScalar_2Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordScalar_2", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_2, GeometryType::AABB));
+        auto newTestCaseScalar_3Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordScalar_3", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_3, GeometryType::AABB));
+        auto newTestCaseScalar_4Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordScalar_4", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_4, GeometryType::AABB));
+        auto newTestCaseScalar_5Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordScalar_5", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_5, GeometryType::AABB));
+        auto newTestCaseScalar_6Ptr = new RayTracingTestCase(
+            testCtx, "shaderRecordScalar_6", CaseDef(TestType::SHADER_RECORD_BLOCK_SCALAR_6, GeometryType::AABB));
 
         // Tests usage of various variables inside a shader record block using scalar layout and explicit offset qualifiers
         auto newTestCaseExplicitScalarOffset_1Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitScalarOffset_1",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_1));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_1, GeometryType::AABB));
         auto newTestCaseExplicitScalarOffset_2Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitScalarOffset_2",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_2));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_2, GeometryType::AABB));
         auto newTestCaseExplicitScalarOffset_3Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitScalarOffset_3",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_3));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_3, GeometryType::AABB));
         auto newTestCaseExplicitScalarOffset_4Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitScalarOffset_4",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_4));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_4, GeometryType::AABB));
         auto newTestCaseExplicitScalarOffset_5Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitScalarOffset_5",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_5));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_5, GeometryType::AABB));
         auto newTestCaseExplicitScalarOffset_6Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitScalarOffset_6",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_6));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_SCALAR_OFFSET_6, GeometryType::AABB));
 
         // Tests usage of various variables inside a shader record block using std430 layout and explicit offset qualifiers
         auto newTestCaseExplicitSTD430Offset_1Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitSTD430Offset_1",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_1));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_1, GeometryType::AABB));
         auto newTestCaseExplicitSTD430Offset_2Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitSTD430Offset_2",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_2));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_2, GeometryType::AABB));
         auto newTestCaseExplicitSTD430Offset_3Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitSTD430Offset_3",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_3));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_3, GeometryType::AABB));
         auto newTestCaseExplicitSTD430Offset_4Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitSTD430Offset_4",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_4));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_4, GeometryType::AABB));
         auto newTestCaseExplicitSTD430Offset_5Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitSTD430Offset_5",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_5));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_5, GeometryType::AABB));
         auto newTestCaseExplicitSTD430Offset_6Ptr =
             new RayTracingTestCase(testCtx, "shaderRecordExplicitSTD430Offset_6",
-                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_6));
+                                   CaseDef(TestType::SHADER_RECORD_BLOCK_EXPLICIT_STD430_OFFSET_6, GeometryType::AABB));
         miscGroupPtr->addChild(newTestCaseSTD430_1Ptr);
         miscGroupPtr->addChild(newTestCaseSTD430_2Ptr);
         miscGroupPtr->addChild(newTestCaseSTD430_3Ptr);
@@ -10763,12 +11443,16 @@ tcu::TestCaseGroup *createMiscTests(tcu::TestContext &testCtx)
                                     initReuseCreationBufferPrograms, reuseCreationBufferInstance, true /*top*/);
         addFunctionCaseWithPrograms(groupPtr, "reuse_creation_buffer_bottom", checkReuseCreationBufferSupport,
                                     initReuseCreationBufferPrograms, reuseCreationBufferInstance, false /*top*/);
-        addFunctionCaseWithPrograms(groupPtr, "reuse_scratch_buffer", checkReuseScratchBufferSupport,
+        addFunctionCaseWithPrograms(groupPtr, "reuse_scratch_buffer", checkRTPipelineSupport,
                                     initReuseScratchBufferPrograms, reuseScratchBufferInstance);
         addFunctionCaseWithPrograms(groupPtr, "update_empty_bottom", checkRTPipelineSupport, initEmptyASPrograms,
                                     updateEmptyBottomASInstance);
         addFunctionCaseWithPrograms(groupPtr, "update_empty_top", checkRTPipelineSupport, initEmptyASPrograms,
                                     updateEmptyTopASInstance);
+        addFunctionCaseWithPrograms(groupPtr, "shaders_from_lib", checkRTPipelineSupport, initShadersFromLibPrograms,
+                                    shadersFromLibInstance);
+        addFunctionCaseWithPrograms(groupPtr, "preserve_flip_facing", checkRTPipelineSupport, initFlipFacingPrograms,
+                                    flipFacingPreserveInstance);
     }
 
     return miscGroupPtr.release();

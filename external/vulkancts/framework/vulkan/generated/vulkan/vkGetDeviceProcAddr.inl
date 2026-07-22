@@ -20,16 +20,14 @@ using namespace vk;
 
 tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 {
-    tcu::TestLog&                                log                        (context.getTestContext().getLog());
-    const PlatformInterface&                    platformInterface = context.getPlatformInterface();
-    const auto                                    validationEnabled = context.getTestContext().getCommandLine().isValidationEnabled();
-    const CustomInstance                        instance                (createCustomInstanceFromContext(context));
-    const InstanceDriver&                        instanceDriver = instance.getDriver();
-    const VkPhysicalDevice                        physicalDevice = chooseDevice(instanceDriver, instance, context.getTestContext().getCommandLine());
-    const uint32_t                                queueFamilyIndex = 0;
-    const uint32_t                                queueCount = 1;
-    const float                                    queuePriority = 1.0f;
-    const std::vector<VkQueueFamilyProperties>    queueFamilyProperties = getPhysicalDeviceQueueFamilyProperties(instanceDriver, physicalDevice);
+    tcu::TestLog&                               log                   = context.getTestContext().getLog();
+    const InstanceWrapper instance(createCustomInstanceFromContext(context, nullptr, false));
+    const auto&                                 instanceDriver        = instance.getDriver();
+    const VkPhysicalDevice                      physicalDevice        = instance.getPhysicalDevice();
+    const uint32_t                              queueFamilyIndex      = 0;
+    const uint32_t                              queueCount            = 1;
+    const float                                 queuePriority         = 1.0f;
+    const std::vector<VkQueueFamilyProperties>  queueFamilyProperties = getPhysicalDeviceQueueFamilyProperties(instanceDriver, physicalDevice);
 
     const VkDeviceQueueCreateInfo            deviceQueueCreateInfo =
     {
@@ -54,8 +52,9 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
         nullptr, //  const char* const* ppEnabledExtensionNames;
         nullptr, //  const VkPhysicalDeviceFeatures* pEnabledFeatures;
     };
-    const Unique<VkDevice>                    device            (createCustomDevice(validationEnabled, platformInterface, instance, instanceDriver, physicalDevice, &deviceCreateInfo));
-    const DeviceDriver                        deviceDriver    (platformInterface, instance, device.get(), context.getUsedApiVersion(), context.getTestContext().getCommandLine());
+
+    const auto                                device       = instance.createCustomDevice(physicalDevice, &deviceCreateInfo);
+    const auto&                               deviceDriver = device.getDriver();
 
     const std::vector<std::string> functions{
 
@@ -82,6 +81,20 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkCmdDrawIndexedIndirectCountAMD",
 		"vkCmdDrawIndirectCountAMD",
 
+		// "VK_AMD_gpa_interface
+		"vkCmdBeginGpaSampleAMD",
+		"vkCmdBeginGpaSessionAMD",
+		"vkCmdCopyGpaSessionResultsAMD",
+		"vkCmdEndGpaSampleAMD",
+		"vkCmdEndGpaSessionAMD",
+		"vkCreateGpaSessionAMD",
+		"vkDestroyGpaSessionAMD",
+		"vkGetGpaDeviceClockInfoAMD",
+		"vkGetGpaSessionResultsAMD",
+		"vkGetGpaSessionStatusAMD",
+		"vkResetGpaSessionAMD",
+		"vkSetGpaDeviceClockModeAMD",
+
 		// "VK_AMD_shader_info
 		"vkGetShaderInfoAMD",
 
@@ -102,8 +115,27 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkGetPhysicalDeviceQueueFamilyDataGraphProcessingEnginePropertiesARM",
 		"vkGetPhysicalDeviceQueueFamilyDataGraphPropertiesARM",
 
+		// "VK_ARM_data_graph_instruction_set_tosa
+		"vkGetPhysicalDeviceQueueFamilyDataGraphEngineOperationPropertiesARM",
+
+		// "VK_ARM_data_graph_optical_flow
+		"vkGetPhysicalDeviceQueueFamilyDataGraphEngineOperationPropertiesARM",
+		"vkGetPhysicalDeviceQueueFamilyDataGraphOpticalFlowImageFormatsARM",
+
 		// "VK_ARM_performance_counters_by_region
 		"vkEnumeratePhysicalDeviceQueueFamilyPerformanceCountersByRegionARM",
+
+		// "VK_ARM_scheduling_controls
+		"vkCmdSetDispatchParametersARM",
+
+		// "VK_ARM_shader_instrumentation
+		"vkClearShaderInstrumentationMetricsARM",
+		"vkCmdBeginShaderInstrumentationARM",
+		"vkCmdEndShaderInstrumentationARM",
+		"vkCreateShaderInstrumentationARM",
+		"vkDestroyShaderInstrumentationARM",
+		"vkEnumeratePhysicalDeviceShaderInstrumentationMetricsARM",
+		"vkGetShaderInstrumentationValuesARM",
 
 		// "VK_ARM_tensors
 		"vkBindTensorMemoryARM",
@@ -189,6 +221,18 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkGetImageOpaqueCaptureDescriptorDataEXT",
 		"vkGetImageViewOpaqueCaptureDescriptorDataEXT",
 		"vkGetSamplerOpaqueCaptureDescriptorDataEXT",
+
+		// "VK_EXT_descriptor_heap
+		"vkCmdBindResourceHeapEXT",
+		"vkCmdBindSamplerHeapEXT",
+		"vkCmdPushDataEXT",
+		"vkGetImageOpaqueCaptureDataEXT",
+		"vkGetPhysicalDeviceDescriptorSizeEXT",
+		"vkGetTensorOpaqueCaptureDataARM",
+		"vkRegisterCustomBorderColorEXT",
+		"vkUnregisterCustomBorderColorEXT",
+		"vkWriteResourceDescriptorsEXT",
+		"vkWriteSamplerDescriptorsEXT",
 
 		// "VK_EXT_device_fault
 		"vkGetDeviceFaultInfoEXT",
@@ -366,6 +410,9 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkGetSwapchainTimeDomainPropertiesEXT",
 		"vkGetSwapchainTimingPropertiesEXT",
 		"vkSetSwapchainPresentTimingQueueSizeEXT",
+
+		// "VK_EXT_primitive_restart_index
+		"vkCmdSetPrimitiveRestartIndexEXT",
 
 		// "VK_EXT_private_data
 		"vkCreatePrivateDataSlotEXT",
@@ -574,6 +621,34 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkCreateDescriptorUpdateTemplateKHR",
 		"vkDestroyDescriptorUpdateTemplateKHR",
 		"vkUpdateDescriptorSetWithTemplateKHR",
+
+		// "VK_KHR_device_address_commands
+		"vkCmdBeginConditionalRendering2EXT",
+		"vkCmdBeginTransformFeedback2EXT",
+		"vkCmdBindIndexBuffer3KHR",
+		"vkCmdBindTransformFeedbackBuffers2EXT",
+		"vkCmdBindVertexBuffers3KHR",
+		"vkCmdCopyImageToMemoryKHR",
+		"vkCmdCopyMemoryKHR",
+		"vkCmdCopyMemoryToImageKHR",
+		"vkCmdCopyQueryPoolResultsToMemoryKHR",
+		"vkCmdDispatchIndirect2KHR",
+		"vkCmdDrawIndexedIndirect2KHR",
+		"vkCmdDrawIndexedIndirectCount2KHR",
+		"vkCmdDrawIndirect2KHR",
+		"vkCmdDrawIndirectByteCount2EXT",
+		"vkCmdDrawIndirectCount2KHR",
+		"vkCmdDrawMeshTasksIndirect2EXT",
+		"vkCmdDrawMeshTasksIndirectCount2EXT",
+		"vkCmdEndTransformFeedback2EXT",
+		"vkCmdFillMemoryKHR",
+		"vkCmdUpdateMemoryKHR",
+		"vkCmdWriteMarkerToMemoryAMD",
+		"vkCreateAccelerationStructure2KHR",
+
+		// "VK_KHR_device_fault
+		"vkGetDeviceFaultDebugInfoKHR",
+		"vkGetDeviceFaultReportsKHR",
 
 		// "VK_KHR_device_group
 		"vkAcquireNextImage2KHR",
@@ -843,6 +918,7 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkDestroyCuModuleNVX",
 
 		// "VK_NVX_image_view_handle
+		"vkGetDeviceCombinedImageSamplerIndexNVX",
 		"vkGetImageViewAddressNVX",
 		"vkGetImageViewHandle64NVX",
 		"vkGetImageViewHandleNVX",
@@ -857,6 +933,9 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		// "VK_NV_cluster_acceleration_structure
 		"vkCmdBuildClusterAccelerationStructureIndirectNV",
 		"vkGetClusterAccelerationStructureBuildSizesNV",
+
+		// "VK_NV_compute_occupancy_priority
+		"vkCmdSetComputeOccupancyPriorityNV",
 
 		// "VK_NV_cooperative_matrix
 		"vkGetPhysicalDeviceCooperativeMatrixPropertiesNV",
@@ -973,13 +1052,11 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkGetMemoryNativeBufferOHOS",
 		"vkGetNativeBufferPropertiesOHOS",
 
-		// "VK_OHOS_native_buffer
-		"vkAcquireImageOHOS",
-		"vkGetSwapchainGrallocUsageOHOS",
-		"vkQueueSignalReleaseImageOHOS",
-
 		// "VK_OHOS_surface
 		"vkCreateSurfaceOHOS",
+
+		// "VK_QCOM_queue_perf_hint
+		"vkQueueSetPerfHintQCOM",
 
 		// "VK_QCOM_tile_memory_heap
 		"vkCmdBindTileMemoryQCOM",
@@ -1000,6 +1077,10 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
 		"vkCreateScreenSurfaceQNX",
 		"vkGetPhysicalDeviceScreenPresentationSupportQNX",
 
+		// "VK_SEC_ubm_surface
+		"vkCreateUbmSurfaceSEC",
+		"vkGetPhysicalDeviceUbmPresentationSupportSEC",
+
 		// "VK_VALVE_descriptor_set_host_mapping
 		"vkGetDescriptorSetHostMappingVALVE",
 		"vkGetDescriptorSetLayoutHostMappingInfoVALVE",
@@ -1008,7 +1089,7 @@ tcu::TestStatus        testGetDeviceProcAddr        (Context& context)
     bool fail = false;
     for (const auto& function : functions)
     {
-        if (deviceDriver.getDeviceProcAddr(device.get(), function.c_str()) != nullptr)
+        if (deviceDriver.getDeviceProcAddr(device, function.c_str()) != nullptr)
         {
             fail = true;
             log << tcu::TestLog::Message << "Function " << function << " is not NULL" << tcu::TestLog::EndMessage;

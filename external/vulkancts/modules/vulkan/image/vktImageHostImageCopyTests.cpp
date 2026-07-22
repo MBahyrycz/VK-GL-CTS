@@ -494,16 +494,19 @@ tcu::TestStatus HostImageCopyTestInstance::iterate(void)
         {
             createInfo.flags |= (vk::VK_IMAGE_CREATE_SPARSE_BINDING_BIT | vk::VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT);
             // VUID-VkImageCreateInfo-tiling-04121
-            createInfo.tiling  = vk::VK_IMAGE_TILING_OPTIMAL;
+            createInfo.tiling = vk::VK_IMAGE_TILING_OPTIMAL;
+            const auto waitType =
+                ((m_parameters.action == MEMORY_TO_IMAGE) ? SparseImage::WaitType::SEMAPHORE_AND_FENCE :
+                                                            SparseImage::WaitType::SEMAPHORE);
             sparseSampledImage = de::MovePtr<SparseImage>(new SparseImage(vk, device, physicalDevice, vki, createInfo,
                                                                           m_context.getSparseQueue(), alloc,
-                                                                          mapVkFormat(createInfo.format)));
+                                                                          mapVkFormat(createInfo.format), waitType));
             sampledImage       = **sparseSampledImage;
             if (m_parameters.action == MEMCPY)
             {
                 sparseSampledImageCopy = de::MovePtr<SparseImage>(
                     new SparseImage(vk, device, physicalDevice, vki, createInfo, m_context.getSparseQueue(), alloc,
-                                    mapVkFormat(createInfo.format)));
+                                    mapVkFormat(createInfo.format), SparseImage::WaitType::SEMAPHORE_AND_FENCE));
                 sampledImageCopy = **sparseSampledImageCopy;
             }
         }
@@ -751,6 +754,8 @@ tcu::TestStatus HostImageCopyTestInstance::iterate(void)
         computePipeline = createComputePipeline(vk, device, VK_NULL_HANDLE, &pipelineCreateInfo);
     }
 
+    m_context.getTestContext().touchWatchdog();
+
     de::MovePtr<BufferWithMemory> colorOutputBuffer = de::MovePtr<BufferWithMemory>(new BufferWithMemory(
         vk, device, alloc, makeBufferCreateInfo(outputBufferSize, vk::VK_BUFFER_USAGE_TRANSFER_DST_BIT),
         MemoryRequirement::HostVisible));
@@ -758,6 +763,9 @@ tcu::TestStatus HostImageCopyTestInstance::iterate(void)
     // Load sampled image
     if (m_parameters.action == MEMORY_TO_IMAGE)
     {
+        if (sparseSampledImage && sparseSampledImage->getFence() != VK_NULL_HANDLE)
+            waitForFence(vk, device, sparseSampledImage->getFence());
+
         transitionImageLayout(&cmdBuffer, sampledImage, sampledImageUsage, vk::VK_IMAGE_LAYOUT_UNDEFINED,
                               m_parameters.dstLayout, sampledSubresourceRange);
         commandsLog << "vkTransitionImageLayoutEXT() image " << sampledImage << " to layout "
@@ -906,6 +914,9 @@ tcu::TestStatus HostImageCopyTestInstance::iterate(void)
                     << "), yOffset (" << region.imageOffset.y << "), width (" << mipImageSize.width << "), height ("
                     << mipImageSize.height << ")\n";
 
+        if (sparseSampledImageCopy && sparseSampledImageCopy->getFence() != VK_NULL_HANDLE)
+            waitForFence(vk, device, sparseSampledImageCopy->getFence());
+
         transitionImageLayout(&cmdBuffer, sampledImageCopy, sampledImageUsage, vk::VK_IMAGE_LAYOUT_UNDEFINED,
                               m_parameters.dstLayout, sampledSubresourceRange);
 
@@ -1038,6 +1049,8 @@ tcu::TestStatus HostImageCopyTestInstance::iterate(void)
     tcu::ConstPixelBufferAccess resultBuffer =
         tcu::ConstPixelBufferAccess(outputFormat, renderArea.extent.width, renderArea.extent.height, 1,
                                     (const void *)colorOutputBuffer->getAllocation().getHostPtr());
+
+    m_context.getTestContext().touchWatchdog();
 
     if (m_parameters.action == IMAGE_TO_MEMORY)
     {
@@ -1402,7 +1415,8 @@ class PreinitializedTestInstance : public vkt::TestInstance
 public:
     PreinitializedTestInstance(vkt::Context &context, const vk::VkFormat format, vk::VkImageLayout srcLayout,
                                vk::VkImageLayout dstLayout, vk::VkExtent3D size, uint32_t arrayLayers,
-                               bool imageToImageCopy, bool memcpy, vk::VkImageTiling tiling, uint32_t offset)
+                               bool imageToImageCopy, bool memcpy, vk::VkImageTiling tiling, uint32_t offset,
+                               bool captureReplay)
         : vkt::TestInstance(context)
         , m_format(format)
         , m_srcLayout(srcLayout)
@@ -1413,6 +1427,7 @@ public:
         , m_memcpy(memcpy)
         , m_tiling(tiling)
         , m_offset(offset)
+        , m_captureReplay(captureReplay)
     {
     }
 
@@ -1428,7 +1443,51 @@ private:
     const bool m_memcpy;
     const vk::VkImageTiling m_tiling;
     const uint32_t m_offset;
+    const bool m_captureReplay;
 };
+
+static VkImageUsageFlags GetUsage(VkImageLayout srcLayout, VkImageLayout dstLayout)
+{
+    vk::VkImageUsageFlags usage = vk::VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+        usage |= vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        usage |= vk::VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL || dstLayout == vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        usage |= vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+        srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
+        srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
+        srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL ||
+        srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL ||
+        srcLayout == vk::VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL ||
+        srcLayout == vk::VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL)
+        usage |= vk::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT ||
+        dstLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
+    {
+        usage |= vk::VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+        usage |= vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        usage |= vk::VK_IMAGE_USAGE_SAMPLED_BIT;
+    }
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL || dstLayout == vk::VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
+        usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (srcLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL || dstLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL)
+    {
+        if ((usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) == 0)
+            usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    return usage;
+}
 
 tcu::TestStatus PreinitializedTestInstance::iterate(void)
 {
@@ -1475,11 +1534,16 @@ tcu::TestStatus PreinitializedTestInstance::iterate(void)
     drmCreateInfo.drmFormatModifierCount                        = 1;
     drmCreateInfo.pDrmFormatModifiers                           = &modifier;
 
+    const VkImageUsageFlags usage = GetUsage(m_srcLayout, m_dstLayout);
+
+    VkImageCreateFlags imageCreateFlags =
+        m_captureReplay ? vk::VK_IMAGE_CREATE_DESCRIPTOR_HEAP_CAPTURE_REPLAY_BIT_EXT : 0;
+
     vk::VkImageCreateInfo createInfo = {
         vk::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, // VkStructureType            sType
         m_tiling == vk::VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT ? &drmCreateInfo : nullptr,
         // const void*                pNext
-        0u,                        // VkImageCreateFlags        flags
+        imageCreateFlags,          // VkImageCreateFlags        flags
         imageType,                 // VkImageType                imageType
         m_format,                  // VkFormat                    format
         m_size,                    // VkExtent3D                extent
@@ -1487,7 +1551,7 @@ tcu::TestStatus PreinitializedTestInstance::iterate(void)
         m_arrayLayers,             // uint32_t                    arrayLayers
         vk::VK_SAMPLE_COUNT_1_BIT, // VkSampleCountFlagBits    samples
         m_tiling,                  // VkImageTiling            tiling
-        vk::VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        usage,                     // VkImageUsageFlags         usage
         // VkImageUsageFlags        usage
         vk::VK_SHARING_MODE_EXCLUSIVE,     // VkSharingMode            sharingMode
         0,                                 // uint32_t                    queueFamilyIndexCount
@@ -1495,28 +1559,18 @@ tcu::TestStatus PreinitializedTestInstance::iterate(void)
         vk::VK_IMAGE_LAYOUT_PREINITIALIZED // VkImageLayout            initialLayout
     };
 
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-        createInfo.usage |= vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        createInfo.usage |= vk::VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        createInfo.usage |= vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
-        m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
-        m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
-        m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL)
-        createInfo.usage |= vk::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
-    {
-        createInfo.usage |= vk::VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-        createInfo.usage |= vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        createInfo.usage |= vk::VK_IMAGE_USAGE_SAMPLED_BIT;
-    }
-
+    vk::MemoryRequirement imageMemoryRequirement =
+        m_captureReplay ? (vk::MemoryRequirement::HostVisible | vk::MemoryRequirement::DeviceAddress |
+                           vk::MemoryRequirement::DeviceAddressCaptureReplay) :
+                          vk::MemoryRequirement::HostVisible;
     de::MovePtr<ImageWithMemory> image = de::MovePtr<ImageWithMemory>(
-        new ImageWithMemory(vk, device, *allocatorWithOffset, createInfo, vk::MemoryRequirement::HostVisible));
+        new ImageWithMemory(vk, device, *allocatorWithOffset, createInfo, imageMemoryRequirement));
+
+    vk::MemoryRequirement copyImageMemoryRequirement =
+        m_captureReplay ? (vk::MemoryRequirement::DeviceAddress | vk::MemoryRequirement::DeviceAddressCaptureReplay) :
+                          vk::MemoryRequirement::Any;
     de::MovePtr<ImageWithMemory> copyImage = de::MovePtr<ImageWithMemory>(
-        new ImageWithMemory(vk, device, *allocatorWithOffset, createInfo, vk::MemoryRequirement::Any));
+        new ImageWithMemory(vk, device, *allocatorWithOffset, createInfo, copyImageMemoryRequirement));
     const vk::VkImage endImage                 = m_imageToImageCopy ? **copyImage : **image;
     de::MovePtr<BufferWithMemory> outputBuffer = de::MovePtr<BufferWithMemory>(
         new BufferWithMemory(vk, device, alloc, makeBufferCreateInfo(bufferSize, vk::VK_BUFFER_USAGE_TRANSFER_DST_BIT),
@@ -1695,7 +1749,7 @@ public:
     PreinitializedTestCase(tcu::TestContext &context, const char *name, const vk::VkFormat format,
                            vk::VkImageLayout srcLayout, vk::VkImageLayout dstLayout, vk::VkExtent3D size,
                            uint32_t arrayLayers, bool imageToImageCopy, bool memcpy, vk::VkImageTiling tiling,
-                           uint32_t offset)
+                           uint32_t offset, bool captureReplay)
         : TestCase(context, name)
         , m_format(format)
         , m_srcLayout(srcLayout)
@@ -1706,6 +1760,7 @@ public:
         , m_memcpy(memcpy)
         , m_tiling(tiling)
         , m_offset(offset)
+        , m_captureReplay(captureReplay)
     {
     }
 
@@ -1714,7 +1769,7 @@ private:
     vkt::TestInstance *createInstance(vkt::Context &context) const
     {
         return new PreinitializedTestInstance(context, m_format, m_srcLayout, m_dstLayout, m_size, m_arrayLayers,
-                                              m_imageToImageCopy, m_memcpy, m_tiling, m_offset);
+                                              m_imageToImageCopy, m_memcpy, m_tiling, m_offset, m_captureReplay);
     }
 
     const vk::VkFormat m_format;
@@ -1726,6 +1781,7 @@ private:
     const bool m_memcpy;
     const vk::VkImageTiling m_tiling;
     const uint32_t m_offset;
+    const bool m_captureReplay;
 };
 
 void PreinitializedTestCase::checkSupport(vkt::Context &context) const
@@ -1764,6 +1820,9 @@ void PreinitializedTestCase::checkSupport(vkt::Context &context) const
     if (m_srcLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT ||
         m_dstLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
         context.requireDeviceFunctionality("VK_EXT_attachment_feedback_loop_layout");
+
+    if (m_captureReplay)
+        context.requireDeviceFunctionality("VK_EXT_descriptor_heap");
 
     vk::VkPhysicalDeviceHostImageCopyFeaturesEXT hostImageCopyFeatures = {
         vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES_EXT, // VkStructureType                    sType
@@ -1837,24 +1896,7 @@ void PreinitializedTestCase::checkSupport(vkt::Context &context) const
         nullptr // const uint32_t* pQueueFamilyIndices;
     };
 
-    vk::VkImageUsageFlags usage = vk::VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-        usage |= vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-        usage |= vk::VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-        usage |= vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
-        m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL ||
-        m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL ||
-        m_srcLayout == vk::VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL)
-        usage |= vk::VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    if (m_srcLayout == vk::VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
-    {
-        usage |= vk::VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-        usage |= vk::VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        usage |= vk::VK_IMAGE_USAGE_SAMPLED_BIT;
-    }
+    const VkImageUsageFlags usage = GetUsage(m_srcLayout, m_dstLayout);
 
     vk::VkPhysicalDeviceImageFormatInfo2 imageFormatInfo = {
         vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,                         // VkStructureType sType;
@@ -2464,16 +2506,6 @@ tcu::TestStatus IdenticalMemoryLayoutTestInstance::iterate(void)
                  ((hasDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)) :
                  VK_IMAGE_ASPECT_COLOR_BIT);
         const auto imageSRR = makeImageSubresourceRange(aspectMask, 0u, 1u, 0u, 1u);
-
-        // As copying depth/stencil requires queue that supports graphics operations we need to throw NotSupported for compute only implementations
-        if (hasDepth || hasStencil)
-        {
-            const bool isComputeOnly = m_context.getTestContext().getCommandLine().isComputeOnly();
-            if (isComputeOnly)
-            {
-                TCU_THROW(NotSupportedError, "Universal queue does not support graphics operations.");
-            }
-        }
 
         beginCommandBuffer(vk, *cmdbuffer);
         vk.cmdFillBuffer(*cmdbuffer, *baseBuffer, 0ull, VK_WHOLE_SIZE, 0u);
@@ -3255,21 +3287,22 @@ tcu::TestStatus HostImageArrayCopyTestInstance::iterate(void)
     }
 
     vk::VkImageCreateInfo createInfo = {
-        vk::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,  // VkStructureType          sType
-        nullptr,                                  // const void*              pNext
-        createFlags,                              // VkImageCreateFlags       flags
-        imageType,                                // VkImageType              imageType
-        m_params.format,                          // VkFormat                 format
-        {imageWidth, imageHeight, imageDepth},    // VkExtent3D               extent
-        1u,                                       // uint32_t                 mipLevels
-        maxLayers,                                // uint32_t                 arrayLayers
-        vk::VK_SAMPLE_COUNT_1_BIT,                // VkSampleCountFlagBits    samples
-        m_params.tiling,                          // VkImageTiling            tiling
-        vk::VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT, // VkImageUsageFlags        usage
-        vk::VK_SHARING_MODE_EXCLUSIVE,            // VkSharingMode            sharingMode
-        0,                                        // uint32_t                 queueFamilyIndexCount
-        nullptr,                                  // const uint32_t*          pQueueFamilyIndices
-        vk::VK_IMAGE_LAYOUT_UNDEFINED             // VkImageLayout            initialLayout
+        vk::VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, // VkStructureType          sType
+        nullptr,                                 // const void*              pNext
+        createFlags,                             // VkImageCreateFlags       flags
+        imageType,                               // VkImageType              imageType
+        m_params.format,                         // VkFormat                 format
+        {imageWidth, imageHeight, imageDepth},   // VkExtent3D               extent
+        1u,                                      // uint32_t                 mipLevels
+        maxLayers,                               // uint32_t                 arrayLayers
+        vk::VK_SAMPLE_COUNT_1_BIT,               // VkSampleCountFlagBits    samples
+        m_params.tiling,                         // VkImageTiling            tiling
+        vk::VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | vk::VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            vk::VK_IMAGE_USAGE_TRANSFER_DST_BIT, // VkImageUsageFlags        usage
+        vk::VK_SHARING_MODE_EXCLUSIVE,           // VkSharingMode            sharingMode
+        0,                                       // uint32_t                 queueFamilyIndexCount
+        nullptr,                                 // const uint32_t*          pQueueFamilyIndices
+        vk::VK_IMAGE_LAYOUT_UNDEFINED            // VkImageLayout            initialLayout
     };
 
     const auto srcImage =
@@ -4835,7 +4868,7 @@ void testGenerator(tcu::TestCaseGroup *group)
                                 offsetGroup->addChild(new PreinitializedTestCase(
                                     testCtx, formatName.c_str(), format.format, srcLayout.layout, dstLayout.layout,
                                     size.size, size.layerCount, imageToImage.imageToImageCopy, imageToImage.memcpy,
-                                    tiling.tiling, offset.offset));
+                                    tiling.tiling, offset.offset, false));
                             }
                             sizeGroup->addChild(offsetGroup.release());
                         }
@@ -4849,6 +4882,14 @@ void testGenerator(tcu::TestCaseGroup *group)
         }
         group->addChild(tilingGroup.release());
     }
+
+    de::MovePtr<tcu::TestCaseGroup> captureReplayGroup(new tcu::TestCaseGroup(testCtx, "capture_replay"));
+    {
+        captureReplayGroup->addChild(new PreinitializedTestCase(
+            testCtx, "heap", vk::VK_FORMAT_R8G8B8A8_UNORM, vk::VK_IMAGE_LAYOUT_GENERAL, vk::VK_IMAGE_LAYOUT_GENERAL,
+            {32, 32, 1}, 1u, true, false, vk::VK_IMAGE_TILING_OPTIMAL, 0u, true));
+    }
+    group->addChild(captureReplayGroup.release());
 
     de::MovePtr<tcu::TestCaseGroup> propertiesGroup(new tcu::TestCaseGroup(testCtx, "properties"));
     propertiesGroup->addChild(new PropertiesTestCase(testCtx, "properties"));

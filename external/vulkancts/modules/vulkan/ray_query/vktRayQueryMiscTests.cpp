@@ -47,6 +47,8 @@
 #include <limits>
 #include <vector>
 #include <map>
+#include <memory>
+#include <array>
 
 namespace vkt
 {
@@ -64,21 +66,35 @@ void checkRayQuerySupport(Context &context)
     context.requireDeviceFunctionality("VK_KHR_ray_query");
 }
 
+struct DynamicIndexingParams
+{
+    bool useFirst = false; // Make the code using the queries come before the code that initializes them.
+    bool useSpirv = false; // Use a SPIR-V shader. This allows us to test OpInBoundsAccessChain with arrays of queries.
+
+    uint32_t getLocalSizeX() const
+    {
+        return (useFirst ? 4u : 48u);
+    }
+
+    uint32_t getNumQueries() const
+    {
+        return (useFirst ? 4u : 48u);
+    }
+};
+
 class DynamicIndexingCase : public vkt::TestCase
 {
 public:
-    DynamicIndexingCase(tcu::TestContext &testCtx, const std::string &name);
+    DynamicIndexingCase(tcu::TestContext &testCtx, const std::string &name, const DynamicIndexingParams &params);
     virtual ~DynamicIndexingCase(void)
     {
     }
 
+    void initProgramsGLSL(vk::SourceCollections &programCollection) const;
+    void initProgramsSPV(vk::SourceCollections &programCollection) const;
     virtual void initPrograms(vk::SourceCollections &programCollection) const override;
     virtual void checkSupport(Context &context) const override;
     virtual TestInstance *createInstance(Context &context) const override;
-
-    // Constants and data types.
-    static constexpr uint32_t kLocalSizeX = 48u;
-    static constexpr uint32_t kNumQueries = 48u;
 
     // This must match the shader.
     struct InputData
@@ -86,35 +102,184 @@ public:
         uint32_t goodQueryIndex;
         uint32_t proceedQueryIndex;
     };
+
+protected:
+    const DynamicIndexingParams m_params;
 };
 
 class DynamicIndexingInstance : public vkt::TestInstance
 {
 public:
-    DynamicIndexingInstance(Context &context);
+    DynamicIndexingInstance(Context &context, const DynamicIndexingParams &params);
     virtual ~DynamicIndexingInstance(void)
     {
     }
 
     virtual tcu::TestStatus iterate(void);
+
+protected:
+    const DynamicIndexingParams m_params;
 };
 
-DynamicIndexingCase::DynamicIndexingCase(tcu::TestContext &testCtx, const std::string &name)
+DynamicIndexingCase::DynamicIndexingCase(tcu::TestContext &testCtx, const std::string &name,
+                                         const DynamicIndexingParams &params)
     : vkt::TestCase(testCtx, name)
+    , m_params(params)
 {
 }
 
 void DynamicIndexingCase::initPrograms(vk::SourceCollections &programCollection) const
 {
+    if (m_params.useSpirv)
+        initProgramsSPV(programCollection);
+    else
+        initProgramsGLSL(programCollection);
+}
+
+void DynamicIndexingCase::initProgramsSPV(vk::SourceCollections &programCollection) const
+{
+    DE_ASSERT(!m_params.useFirst);
+
+    // Equivalent to the GLSL shader, obtained from the same equivalent test but with a manual change. See below.
+    std::ostringstream comp;
+    comp << "; SPIR-V\n"
+         << "; Version: 1.4\n"
+         << "; Generator: Khronos Glslang Reference Front End; 11\n"
+         << "; Bound: 105\n"
+         << "; Schema: 0\n"
+         << "OpCapability Shader\n"
+         << "OpCapability RayQueryKHR\n"
+         << "OpExtension \"SPV_KHR_ray_query\"\n"
+         << "%1 = OpExtInstImport \"GLSL.std.450\"\n"
+         << "OpMemoryModel Logical GLSL450\n"
+         << "OpEntryPoint GLCompute %4 \"main\" %14 %19 %58 %64 %87\n"
+         << "OpExecutionMode %4 LocalSize " << m_params.getLocalSizeX() << " 1 1\n"
+         << "OpMemberDecorate %10 0 Offset 0\n"
+         << "OpMemberDecorate %10 1 Offset 4\n"
+         << "OpDecorate %11 ArrayStride 8\n"
+         << "OpDecorate %12 Block\n"
+         << "OpMemberDecorate %12 0 Offset 0\n"
+         << "OpDecorate %14 Binding 1\n"
+         << "OpDecorate %14 DescriptorSet 0\n"
+         << "OpDecorate %19 BuiltIn LocalInvocationId\n"
+         << "OpDecorate %64 Binding 0\n"
+         << "OpDecorate %64 DescriptorSet 0\n"
+         << "OpDecorate %84 ArrayStride 4\n"
+         << "OpDecorate %85 Block\n"
+         << "OpMemberDecorate %85 0 Offset 0\n"
+         << "OpDecorate %87 Binding 2\n"
+         << "OpDecorate %87 DescriptorSet 0\n"
+         << "OpDecorate %93 BuiltIn WorkgroupSize\n"
+         << "%2 = OpTypeVoid\n"
+         << "%3 = OpTypeFunction %2\n"
+         << "%6 = OpTypeInt 32 0\n"
+         << "%10 = OpTypeStruct %6 %6\n"
+         << "%11 = OpTypeRuntimeArray %10\n"
+         << "%12 = OpTypeStruct %11\n"
+         << "%13 = OpTypePointer StorageBuffer %12\n"
+         << "%14 = OpVariable %13 StorageBuffer\n"
+         << "%15 = OpTypeInt 32 1\n"
+         << "%16 = OpConstant %15 0\n"
+         << "%17 = OpTypeVector %6 3\n"
+         << "%18 = OpTypePointer Input %17\n"
+         << "%19 = OpVariable %18 Input\n"
+         << "%20 = OpConstant %6 0\n"
+         << "%21 = OpTypePointer Input %6\n"
+         << "%24 = OpTypePointer StorageBuffer %10\n"
+         << "%37 = OpConstant %6 " << m_params.getNumQueries() << "\n"
+         << "%38 = OpTypeBool\n"
+         << "%40 = OpTypeFloat 32\n"
+         << "%41 = OpTypeVector %40 3\n"
+         << "%50 = OpConstant %40 0\n"
+         << "%51 = OpConstantComposite %41 %50 %50 %50\n"
+         << "%52 = OpConstant %40 5\n"
+         << "%53 = OpConstantComposite %41 %52 %52 %50\n"
+         << "%55 = OpTypeRayQueryKHR\n"
+         << "%56 = OpTypeArray %55 %37\n"
+         << "%57 = OpTypePointer Private %56\n"
+         << "%58 = OpVariable %57 Private\n"
+         << "%60 = OpTypePointer Private %55\n"
+         << "%62 = OpTypeAccelerationStructureKHR\n"
+         << "%63 = OpTypePointer UniformConstant %62\n"
+         << "%64 = OpVariable %63 UniformConstant\n"
+         << "%66 = OpConstant %6 255\n"
+         << "%68 = OpConstant %40 0.100000001\n"
+         << "%69 = OpConstant %40 1\n"
+         << "%70 = OpConstantComposite %41 %50 %50 %69\n"
+         << "%71 = OpConstant %40 10\n"
+         << "%73 = OpConstant %15 1\n"
+         << "%84 = OpTypeRuntimeArray %6\n"
+         << "%85 = OpTypeStruct %84\n"
+         << "%86 = OpTypePointer StorageBuffer %85\n"
+         << "%87 = OpVariable %86 StorageBuffer\n"
+         << "%90 = OpConstant %6 1\n"
+         << "%91 = OpTypePointer StorageBuffer %6\n"
+         << "%93 = OpConstantComposite %17 %37 %90 %90\n"
+         << "%4 = OpFunction %2 None %3\n"
+         << "%5 = OpLabel\n"
+         << "%22 = OpAccessChain %21 %19 %20\n"
+         << "%23 = OpLoad %6 %22\n"
+         << "%25 = OpAccessChain %24 %14 %16 %23\n"
+         << "%101 = OpAccessChain %91 %25 %20\n"
+         << "%102 = OpLoad %6 %101\n"
+         << "%103 = OpAccessChain %91 %25 %90\n"
+         << "%104 = OpLoad %6 %103\n"
+         << "OpBranch %30\n"
+         << "%30 = OpLabel\n"
+         << "%98 = OpPhi %15 %16 %5 %74 %31\n"
+         << "%36 = OpBitcast %6 %98\n"
+         << "%39 = OpULessThan %38 %36 %37\n"
+         << "OpLoopMerge %32 %31 None\n"
+         << "OpBranchConditional %39 %31 %32\n"
+         << "%31 = OpLabel\n"
+         << "%49 = OpIEqual %38 %36 %102\n"
+         << "%54 = OpSelect %41 %49 %51 %53\n"
+         << "%61 = OpInBoundsAccessChain %60 %58 %98\n" // <-- Changed to OpInBoundsAccessChain here!
+         << "%65 = OpLoad %62 %64\n"
+         << "OpRayQueryInitializeKHR %61 %65 %20 %66 %54 %68 %70 %71\n"
+         << "%74 = OpIAdd %15 %98 %73\n"
+         << "OpBranch %30\n"
+         << "%32 = OpLabel\n"
+         << "OpBranch %75\n"
+         << "%75 = OpLabel\n"
+         << "%82 = OpInBoundsAccessChain %60 %58 %104\n" // <-- Changed to OpInBoundsAccessChain here!
+         << "%83 = OpRayQueryProceedKHR %38 %82\n"
+         << "OpLoopMerge %77 %76 None\n"
+         << "OpBranchConditional %83 %76 %77\n"
+         << "%76 = OpLabel\n"
+         << "%92 = OpAccessChain %91 %87 %16 %23\n"
+         << "OpStore %92 %90\n"
+         << "OpBranch %75\n"
+         << "%77 = OpLabel\n"
+         << "OpReturn\n"
+         << "OpFunctionEnd\n";
+
+    const SpirVAsmBuildOptions buildOptions(programCollection.usedVulkanVersion, SPIRV_VERSION_1_4, true);
+    programCollection.spirvAsmSources.add("comp") << comp.str() << buildOptions;
+}
+
+void DynamicIndexingCase::initProgramsGLSL(vk::SourceCollections &programCollection) const
+{
     const vk::ShaderBuildOptions buildOptions(programCollection.usedVulkanVersion, vk::SPIRV_VERSION_1_4, 0u, true);
 
     std::ostringstream src;
+
+    const std::string initializationLoop =
+        "    // Initialize all queries. Only goodQueryIndex will have the right origin for a hit.\n"
+        "    for (int i = 0; i < numQueries; i++) {\n"
+        "        origin = ((i == inputValues.goodQueryIndex) ? vec3(0, 0, 0) : vec3(5, 5, 0));\n"
+        "        rayQueryInitializeEXT(rayQueries[i], topLevelAS, rayFlags, cullMask, origin, tmin, direct, tmax);\n"
+        "    }\n";
+
+    const std::string usageLoop = "    // Attempt to proceed with the good query to confirm a hit.\n"
+                                  "    while (rayQueryProceedEXT(rayQueries[inputValues.proceedQueryIndex]))\n"
+                                  "        outputBlock.outputData[gl_LocalInvocationID.x] = 1u; \n";
 
     src << "#version 460\n"
         << "#extension GL_EXT_ray_query : require\n"
         << "#extension GL_EXT_ray_tracing : require\n"
         << "\n"
-        << "layout (local_size_x=" << kLocalSizeX << ", local_size_y=1, local_size_z=1) in; \n"
+        << "layout (local_size_x=" << m_params.getLocalSizeX() << ", local_size_y=1, local_size_z=1) in; \n"
         << "\n"
         << "struct InputData {\n"
         << "    uint goodQueryIndex;\n"
@@ -131,7 +296,7 @@ void DynamicIndexingCase::initPrograms(vk::SourceCollections &programCollection)
         << "\n"
         << "void main()\n"
         << "{\n"
-        << "    const uint numQueries = " << kNumQueries << ";\n"
+        << "    const uint numQueries = " << m_params.getNumQueries() << ";\n"
         << "\n"
         << "    const uint rayFlags = 0u; \n"
         << "    const uint cullMask = 0xFFu;\n"
@@ -143,17 +308,22 @@ void DynamicIndexingCase::initPrograms(vk::SourceCollections &programCollection)
         << "    vec3 origin;\n"
         << "\n"
         << "    InputData inputValues = inputBlock.inputData[gl_LocalInvocationID.x];\n"
-        << "\n"
-        << "    // Initialize all queries. Only goodQueryIndex will have the right origin for a hit.\n"
-        << "    for (int i = 0; i < numQueries; i++) {\n"
-        << "        origin = ((i == inputValues.goodQueryIndex) ? vec3(0, 0, 0) : vec3(5, 5, 0));\n"
-        << "        rayQueryInitializeEXT(rayQueries[i], topLevelAS, rayFlags, cullMask, origin, tmin, direct, tmax);\n"
-        << "    }\n"
-        << "\n"
-        << "    // Attempt to proceed with the good query to confirm a hit.\n"
-        << "    while (rayQueryProceedEXT(rayQueries[inputValues.proceedQueryIndex]))\n"
-        << "        outputBlock.outputData[gl_LocalInvocationID.x] = 1u; \n"
-        << "}\n";
+        << "\n";
+
+    if (m_params.useFirst)
+    {
+        src << "    for (int i = 0; i < 2; ++i) {\n"
+            << "        if (i > 0) {\n"
+            << usageLoop << "            continue;\n"
+            << "        }\n"
+            << initializationLoop << "    }\n";
+    }
+    else
+    {
+        src << initializationLoop << "\n" << usageLoop;
+    }
+
+    src << "}\n";
 
     programCollection.glslSources.add("comp") << glu::ComputeSource(updateRayTracingGLSL(src.str())) << buildOptions;
 }
@@ -173,10 +343,12 @@ void DynamicIndexingCase::checkSupport(Context &context) const
 
 vkt::TestInstance *DynamicIndexingCase::createInstance(Context &context) const
 {
-    return new DynamicIndexingInstance(context);
+    return new DynamicIndexingInstance(context, m_params);
 }
 
-DynamicIndexingInstance::DynamicIndexingInstance(Context &context) : vkt::TestInstance(context)
+DynamicIndexingInstance::DynamicIndexingInstance(Context &context, const DynamicIndexingParams &params)
+    : vkt::TestInstance(context)
+    , m_params(params)
 {
 }
 
@@ -193,9 +365,9 @@ uint32_t getRndIndex(de::Random &rng, uint32_t size)
 
 tcu::TestStatus DynamicIndexingInstance::iterate(void)
 {
-    using InputData            = DynamicIndexingCase::InputData;
-    constexpr auto kLocalSizeX = DynamicIndexingCase::kLocalSizeX;
-    constexpr auto kNumQueries = DynamicIndexingCase::kNumQueries;
+    using InputData        = DynamicIndexingCase::InputData;
+    const auto kLocalSizeX = m_params.getLocalSizeX();
+    const auto kNumQueries = m_params.getNumQueries();
 
     const auto &vkd   = m_context.getDeviceInterface();
     const auto device = m_context.getDevice();
@@ -204,34 +376,34 @@ tcu::TestStatus DynamicIndexingInstance::iterate(void)
     const auto qIndex = m_context.getUniversalQueueFamilyIndex();
 
     de::Random rng(1604936737u);
-    InputData inputDataArray[kLocalSizeX];
-    uint32_t outputDataArray[kLocalSizeX];
+    std::vector<InputData> inputDataArray(kLocalSizeX);
+    std::vector<uint32_t> outputDataArray(kLocalSizeX);
 
     // Prepare input buffer.
-    for (int i = 0; i < DE_LENGTH_OF_ARRAY(inputDataArray); ++i)
+    for (size_t i = 0; i < inputDataArray.size(); ++i)
     {
         // The two values will contain the same query index.
         inputDataArray[i].goodQueryIndex    = getRndIndex(rng, kNumQueries);
         inputDataArray[i].proceedQueryIndex = inputDataArray[i].goodQueryIndex;
     }
 
-    const auto inputBufferSize = static_cast<VkDeviceSize>(sizeof(inputDataArray));
+    const auto inputBufferSize = static_cast<VkDeviceSize>(de::dataSize(inputDataArray));
     const auto inputBufferInfo = makeBufferCreateInfo(inputBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     BufferWithMemory inputBuffer(vkd, device, alloc, inputBufferInfo, MemoryRequirement::HostVisible);
     auto &inputBufferAlloc = inputBuffer.getAllocation();
     void *inputBufferPtr   = inputBufferAlloc.getHostPtr();
 
-    deMemcpy(inputBufferPtr, inputDataArray, static_cast<size_t>(inputBufferSize));
+    memcpy(inputBufferPtr, de::dataOrNull(inputDataArray), de::dataSize(inputDataArray));
     flushAlloc(vkd, device, inputBufferAlloc);
 
     // Prepare output buffer.
-    const auto outputBufferSize = static_cast<VkDeviceSize>(sizeof(outputDataArray));
+    const auto outputBufferSize = static_cast<VkDeviceSize>(de::dataSize(outputDataArray));
     const auto outputBufferInfo = makeBufferCreateInfo(outputBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     BufferWithMemory outputBuffer(vkd, device, alloc, outputBufferInfo, MemoryRequirement::HostVisible);
     auto &outputBufferAlloc = outputBuffer.getAllocation();
     void *outputBufferPtr   = outputBufferAlloc.getHostPtr();
 
-    deMemset(outputBufferPtr, 0, static_cast<size_t>(outputBufferSize));
+    memset(outputBufferPtr, 0, static_cast<size_t>(outputBufferSize));
     flushAlloc(vkd, device, outputBufferAlloc);
 
     // Prepare acceleration structures.
@@ -340,9 +512,9 @@ tcu::TestStatus DynamicIndexingInstance::iterate(void)
 
     // Check output buffer.
     invalidateAlloc(vkd, device, outputBufferAlloc);
-    deMemcpy(outputDataArray, outputBufferPtr, static_cast<size_t>(outputBufferSize));
+    memcpy(de::dataOrNull(outputDataArray), outputBufferPtr, de::dataSize(outputDataArray));
 
-    for (int i = 0; i < DE_LENGTH_OF_ARRAY(outputDataArray); ++i)
+    for (size_t i = 0; i < outputDataArray.size(); ++i)
     {
         constexpr auto expected = 1u;
         const auto &value       = outputDataArray[i];
@@ -1862,6 +2034,395 @@ tcu::TestStatus updateEmptyTopASInstance(Context &context)
     return tcu::TestStatus::pass("Pass");
 }
 
+// One ray query per invocation, with varying work group sizes.
+struct RayPerInvParams
+{
+    // If not present, run query from all invocations. If present, only from that one. UINT32_MAX means the last one.
+    tcu::Maybe<uint32_t> single;
+
+    // If 0, use the maximum allowed size. In that case, single can be missing, zero or UINT32_MAX.
+    uint32_t wgSize;
+
+    uint32_t getRngSeed() const
+    {
+        return ((wgSize << 16) | ((!!single ? *single : 0u) & 0xFFFFu));
+    }
+};
+
+using RayPerInvParamsPtr = std::shared_ptr<RayPerInvParams>;
+
+void RayPerInvSupport(Context &context, RayPerInvParamsPtr params)
+{
+    checkRayQuerySupport(context);
+
+    const auto &maxInvs   = context.getDeviceProperties().limits.maxComputeWorkGroupSize[0];
+    const auto usedWgSize = ((params->wgSize == 0u) ? maxInvs : params->wgSize);
+
+    if (maxInvs < usedWgSize)
+        TCU_THROW(NotSupportedError, "Target work group size not supported");
+
+    if (!!params->single && *params->single != std::numeric_limits<uint32_t>::max())
+        DE_ASSERT(*params->single < usedWgSize);
+}
+
+void RayPerInvPrograms(vk::SourceCollections &dst, RayPerInvParamsPtr params)
+{
+    // Global idea: one output value per invocation, one ray per invocation at most. If there is no ray for a given
+    // invocation, the buffer preserves its value (0). If there is a ray and there's an intersection of the expected
+    // type, the output value is 2. If there is a ray and there is no intersection, store a 1.
+
+    std::string condition = "true"; // By default, run the query for all invocations.
+    if (!!params->single)
+    {
+        condition = "gl_LocalInvocationIndex == ";
+        condition += ((*params->single == std::numeric_limits<uint32_t>::max()) ? "(totalInvs - 1u)" :
+                                                                                  std::to_string(*params->single));
+    }
+
+    // Note each invocation will trace a ray from (X.5, 0, 0) towards (0, 0, 1), where X in the invocation index.
+    std::ostringstream comp;
+    comp << "#version 460\n"
+         << "#extension GL_EXT_ray_query : require\n"
+         << "#extension GL_EXT_ray_tracing : require\n"
+         << "layout (local_size_x_id=0, local_size_y_id=1, local_size_z_id=2) in;\n"
+         << "layout (set=0, binding=0) uniform accelerationStructureEXT topLevelAS;\n"
+         << "layout (set=0, binding=1) writeonly buffer SSBO_Block { uint value[]; } ssbo;\n"
+         << "void main(void) {\n"
+         << "    const uint totalInvs = (gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z);\n"
+         << "    const uint rayFlags = 0u;\n"
+         << "    const uint cullMask = 0xFFu;\n"
+         << "    const float tmin = 0.5;\n"
+         << "    const float tmax = 10.0;\n"
+         << "    const vec3 direction = vec3(0, 0, 1);\n"
+         << "    if (" << condition << ") {\n"
+         << "        rayQueryEXT rayQuery;\n"
+         << "        vec3 origin = vec3(float(gl_LocalInvocationIndex) + 0.5, 0.0, 0.0);\n"
+         << "        rayQueryInitializeEXT(rayQuery, topLevelAS, rayFlags, cullMask, origin, tmin, direction, tmax);\n"
+         << "        uint outputValue = 1u;\n"
+         << "        while (rayQueryProceedEXT(rayQuery)) {\n"
+         << "            if (rayQueryGetIntersectionTypeEXT(rayQuery, false) == "
+            "gl_RayQueryCandidateIntersectionTriangleEXT)\n"
+         << "                outputValue = 2u;\n"
+         << "        }\n"
+         << "        ssbo.value[gl_LocalInvocationIndex] = outputValue;\n"
+         << "    }\n"
+         << "}\n";
+    const vk::ShaderBuildOptions buildOptions(dst.usedVulkanVersion, vk::SPIRV_VERSION_1_4, 0u, true);
+    dst.glslSources.add("comp") << glu::ComputeSource(comp.str()) << buildOptions;
+}
+
+tcu::TestStatus RayPerInvRun(Context &context, RayPerInvParamsPtr params)
+{
+    // Decide a WG size.
+    const auto &limits    = context.getDeviceProperties().limits;
+    const auto &maxInvs   = limits.maxComputeWorkGroupSize[0];
+    const auto targetInvs = ((params->wgSize > 0u) ? params->wgSize : maxInvs);
+    const tcu::UVec3 wgSize(targetInvs, 1u, 1u);
+
+    const auto ctx        = context.getContextCommonData();
+    const auto &binaries  = context.getBinaryCollection();
+    const auto compShader = createShaderModule(ctx.vkd, ctx.device, binaries.get("comp"));
+
+    DescriptorPoolBuilder poolBuilder;
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    const auto descriptorPool =
+        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u);
+
+    DescriptorSetLayoutBuilder setLayoutBuilder;
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_SHADER_STAGE_COMPUTE_BIT);
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT);
+    const auto setLayout      = setLayoutBuilder.build(ctx.vkd, ctx.device);
+    const auto pipelineLayout = makePipelineLayout(ctx.vkd, ctx.device, *setLayout);
+    const auto descriptorSet  = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *setLayout);
+
+    // Pipeline.
+    const std::vector<VkSpecializationMapEntry> mapEntries{
+        makeSpecializationMapEntry(0u, sizeof(uint32_t) * 0u, sizeof(uint32_t)),
+        makeSpecializationMapEntry(1u, sizeof(uint32_t) * 1u, sizeof(uint32_t)),
+        makeSpecializationMapEntry(2u, sizeof(uint32_t) * 2u, sizeof(uint32_t)),
+    };
+    const VkSpecializationInfo specializationInfo = {
+        de::sizeU32(mapEntries),
+        de::dataOrNull(mapEntries),
+        sizeof(wgSize),
+        &wgSize,
+    };
+    const auto pipeline =
+        makeComputePipeline(ctx.vkd, ctx.device, *pipelineLayout, 0u, nullptr, *compShader, 0u, &specializationInfo);
+
+    // Resources.
+    const auto rngSeed = params->getRngSeed();
+    de::Random rng(rngSeed);
+
+    // Note each invocation will trace a ray from (X.5, 0, 0) towards (0, 0, 1), where X in the invocation index.
+    // We will create a quad in each [X, X+1] range along the X axis, at Z = 1, with Y from -1 to 1.
+    const auto zCoord = 1.0f;
+    const auto yMin   = -1.0f;
+    const auto yMax   = 1.0f;
+
+    std::vector<tcu::Vec3> triangles;
+    triangles.reserve(6u * targetInvs); // 6 vertices per quad.
+
+    std::vector<bool> hasQuad;
+    hasQuad.reserve(targetInvs);
+
+    for (uint32_t i = 0; i < targetInvs; ++i)
+    {
+        // Pseudorandomly decide if we will get a quad for this invocation.
+        hasQuad.push_back(rng.getBool());
+        if (hasQuad.back())
+        {
+            const auto xMin = static_cast<float>(i);
+            const auto xMax = xMin + 1.0f;
+
+            const tcu::Vec3 topLeft(xMin, yMin, zCoord);
+            const tcu::Vec3 topRight(xMax, yMin, zCoord);
+            const tcu::Vec3 bottomLeft(xMin, yMax, zCoord);
+            const tcu::Vec3 bottomRight(xMax, yMax, zCoord);
+
+            triangles.push_back(topLeft);
+            triangles.push_back(bottomLeft);
+            triangles.push_back(topRight);
+
+            triangles.push_back(bottomLeft);
+            triangles.push_back(bottomRight);
+            triangles.push_back(topRight);
+        }
+    }
+
+    CommandPoolWithBuffer cmd(ctx.vkd, ctx.device, ctx.qfIndex);
+    const auto cmdBuffer = *cmd.cmdBuffer;
+    beginCommandBuffer(ctx.vkd, cmdBuffer);
+
+    AccelerationStructBufferProperties bufferProps;
+    bufferProps.props.residency = ResourceResidency::TRADITIONAL;
+
+    auto blas = makeBottomLevelAccelerationStructure();
+    blas->addGeometry(triangles, true);
+    blas->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    auto tlas = makeTopLevelAccelerationStructure();
+    tlas->addInstance(de::SharedPtr<BottomLevelAccelerationStructure>(blas.release()));
+    tlas->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    std::vector<uint32_t> ssboValues(targetInvs, 0u);
+    const auto ssboSize  = static_cast<VkDeviceSize>(de::dataSize(ssboValues));
+    const auto ssboUsage = static_cast<VkBufferUsageFlags>(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    const auto ssboInfo  = makeBufferCreateInfo(ssboSize, ssboUsage);
+    BufferWithMemory ssbo(ctx.vkd, ctx.device, ctx.allocator, ssboInfo, HostIntent::RW);
+    auto &ssboAlloc = ssbo.getAllocation();
+    memcpy(ssboAlloc.getHostPtr(), de::dataOrNull(ssboValues), de::dataSize(ssboValues));
+    flushAlloc(ctx.vkd, ctx.device, ssboAlloc);
+
+    DescriptorSetUpdateBuilder updateBuilder;
+    const auto binding                                          = DescriptorSetUpdateBuilder::Location::binding;
+    const VkWriteDescriptorSetAccelerationStructureKHR tlasDesc = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+        nullptr,
+        1u,
+        tlas->getPtr(),
+    };
+    updateBuilder.writeSingle(*descriptorSet, binding(0u), VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, &tlasDesc);
+    const auto ssboDesc = makeDescriptorBufferInfo(ssbo.get(), 0ull, VK_WHOLE_SIZE);
+    updateBuilder.writeSingle(*descriptorSet, binding(1u), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &ssboDesc);
+    updateBuilder.update(ctx.vkd, ctx.device);
+
+    const auto bindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
+    ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *pipelineLayout, 0u, 1u, &descriptorSet.get(), 0u, nullptr);
+    ctx.vkd.cmdBindPipeline(cmdBuffer, bindPoint, *pipeline);
+    ctx.vkd.cmdDispatch(cmdBuffer, 1u, 1u, 1u);
+    const auto barrier = makeMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    cmdPipelineMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                             &barrier);
+    endCommandBuffer(ctx.vkd, cmdBuffer);
+    submitCommandsAndWait(ctx.vkd, ctx.device, ctx.queue, cmdBuffer);
+
+    invalidateAlloc(ctx.vkd, ctx.device, ssboAlloc);
+    memcpy(de::dataOrNull(ssboValues), ssboAlloc.getHostPtr(), de::dataSize(ssboValues));
+
+    auto &log = context.getTestContext().getLog();
+    bool fail = false;
+
+    for (uint32_t i = 0u; i < targetInvs; ++i)
+    {
+        uint32_t reference = 0u;
+        if (!params->single ||
+            (!!params->single && (*params->single == i ||
+                                  (*params->single == std::numeric_limits<uint32_t>::max() && i == targetInvs - 1u))))
+        {
+            // A query has been run for this invocation.
+            reference = (hasQuad.at(i) ? 2u : 1u);
+        }
+        const auto &result = ssboValues.at(i);
+        if (result != reference)
+        {
+            fail = true;
+            std::ostringstream msg;
+            msg << "Unexpected result at SSBO value " << i << ": expected " << reference << " but found " << result;
+            log << tcu::TestLog::Message << msg.str() << tcu::TestLog::EndMessage;
+        }
+    }
+
+    if (fail)
+        TCU_FAIL("Unexpected results found in output buffer; check log for details");
+
+    return tcu::TestStatus::pass("Pass");
+}
+
+void initFlipFacingPrograms(vk::SourceCollections &dst)
+{
+    const vk::ShaderBuildOptions buildOptions(dst.usedVulkanVersion, vk::SPIRV_VERSION_1_4, 0u, true);
+
+    std::ostringstream comp;
+    comp << "#version 460 core\n"
+         << "#extension GL_EXT_ray_query : require\n"
+         << "layout (local_size_x=1, local_size_y=1, local_size_z=1) in;\n"
+         << "layout(set=0, binding=0) uniform accelerationStructureEXT topLevelAS;\n"
+         << "layout(set=0, binding=1) buffer OutputBuffer { uint val; } outBuffer;\n"
+         << "void main()\n"
+         << "{\n"
+         << "    const uint  cullMask  = 0xFF;\n"
+         << "    const vec3  origin    = vec3(0.0, 0.0, 0.0);\n"
+         << "    const vec3  direction = vec3(0.0, 0.0, 1.0);\n"
+         << "    const float tMin      = 1.0;\n"
+         << "    const float tMax      = 10.0;\n"
+         << "    const uint  rayFlags  = gl_RayFlagsCullBackFacingTrianglesEXT;\n"
+         << "    rayQueryEXT rq;\n"
+         << "    rayQueryInitializeEXT(rq, topLevelAS, rayFlags, cullMask, origin, tMin, direction, tMax);\n"
+         << "    outBuffer.val = 0u;\n"
+         << "    while (rayQueryProceedEXT(rq)) {\n"
+         << "        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {\n"
+         << "            atomicAdd(outBuffer.val, 1u);\n"
+         << "        }\n"
+         << "    }\n"
+         << "}\n";
+    dst.glslSources.add("comp") << glu::ComputeSource(comp.str()) << buildOptions;
+}
+
+tcu::TestStatus flipFacingRun(Context &context)
+{
+    const auto ctx    = context.getContextCommonData();
+    const auto stages = static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT);
+
+    // Command pool and buffer.
+    CommandPoolWithBuffer cmd(ctx.vkd, ctx.device, ctx.qfIndex);
+    const auto cmdBuffer = *cmd.cmdBuffer;
+
+    // Build acceleration structures.
+    auto topLevelAS    = makeTopLevelAccelerationStructure();
+    auto bottomLevelAS = makeBottomLevelAccelerationStructure();
+
+    const std::vector<float> zPos{5.0f, 6.0f};
+    std::vector<tcu::Vec3> triangles;
+    triangles.reserve(3 * zPos.size());
+    for (const float z : zPos)
+    {
+        // clang-format off
+        triangles.emplace_back(-1.0f, -1.0f, z);
+        triangles.emplace_back( 1.0f, -1.0f, z);
+        triangles.emplace_back( 0.0f,  1.0f, z);
+        // clang-format on
+    }
+
+    bottomLevelAS->addGeometry(triangles, true /*triangles*/);
+
+    AccelerationStructBufferProperties bufferProps;
+    bufferProps.useExternalBuffer = false;
+    bufferProps.props.residency   = ResourceResidency::TRADITIONAL;
+
+    beginCommandBuffer(ctx.vkd, cmdBuffer);
+    bottomLevelAS->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    using SharedBottomPtr = de::SharedPtr<BottomLevelAccelerationStructure>;
+    SharedBottomPtr blasSharedPtr(bottomLevelAS.release());
+
+    topLevelAS->setInstanceCount(1);
+    const auto instanceFlags =
+        static_cast<VkGeometryInstanceFlagsKHR>(VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR);
+    topLevelAS->addInstance(blasSharedPtr, identityMatrix3x4, 0u, 0xFFu, 0u, instanceFlags);
+    topLevelAS->createAndBuild(ctx.vkd, ctx.device, cmdBuffer, ctx.allocator, bufferProps);
+
+    // Create output buffer.
+    const auto bufferSize       = static_cast<VkDeviceSize>(sizeof(uint32_t));
+    const auto bufferCreateInfo = makeBufferCreateInfo(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    BufferWithMemory buffer(ctx.vkd, ctx.device, ctx.allocator, bufferCreateInfo, HostIntent::RW);
+    {
+        auto &alloc = buffer.getAllocation();
+        memset(alloc.getHostPtr(), 0xFF, sizeof(uint32_t));
+        flushAlloc(ctx.vkd, ctx.device, alloc);
+    }
+
+    // Descriptor set layout and pipeline layout.
+    DescriptorSetLayoutBuilder setLayoutBuilder;
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, stages);
+    setLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, stages);
+
+    const auto setLayout      = setLayoutBuilder.build(ctx.vkd, ctx.device);
+    const auto pipelineLayout = makePipelineLayout(ctx.vkd, ctx.device, setLayout.get());
+
+    // Descriptor pool and set.
+    DescriptorPoolBuilder poolBuilder;
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    const auto descriptorPool =
+        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u);
+    const auto descriptorSet = makeDescriptorSet(ctx.vkd, ctx.device, descriptorPool.get(), setLayout.get());
+
+    // Update descriptor set.
+    {
+        const VkWriteDescriptorSetAccelerationStructureKHR accelDescInfo = {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            nullptr,
+            1u,
+            topLevelAS.get()->getPtr(),
+        };
+
+        const auto bufferDescInfo = makeDescriptorBufferInfo(buffer.get(), 0ull, VK_WHOLE_SIZE);
+
+        DescriptorSetUpdateBuilder updateBuilder;
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(0u),
+                                  VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, &accelDescInfo);
+        updateBuilder.writeSingle(descriptorSet.get(), DescriptorSetUpdateBuilder::Location::binding(1u),
+                                  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &bufferDescInfo);
+        updateBuilder.update(ctx.vkd, ctx.device);
+    }
+
+    // Shader modules.
+    const auto &binaries  = context.getBinaryCollection();
+    const auto compModule = createShaderModule(ctx.vkd, ctx.device, binaries.get("comp"));
+    const auto pipeline   = makeComputePipeline(ctx.vkd, ctx.device, *pipelineLayout, *compModule);
+
+    // Trace rays.
+    ctx.vkd.cmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, *pipeline);
+    ctx.vkd.cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, *pipelineLayout, 0u, 1u,
+                                  &descriptorSet.get(), 0u, nullptr);
+    ctx.vkd.cmdDispatch(cmdBuffer, 1u, 1u, 1u);
+
+    // Barrier for the output buffer.
+    const auto bufferBarrier = makeMemoryBarrier(VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+    ctx.vkd.cmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_HOST_BIT, 0u,
+                               1u, &bufferBarrier, 0u, nullptr, 0u, nullptr);
+
+    endCommandBuffer(ctx.vkd, cmdBuffer);
+    submitCommandsAndWait(ctx.vkd, ctx.device, ctx.queue, cmdBuffer);
+
+    // Read value back from the buffer.
+    uint32_t bufferValue = 0xFFu;
+    invalidateAlloc(ctx.vkd, ctx.device, buffer.getAllocation());
+    memcpy(&bufferValue, buffer.getAllocation().getHostPtr(), sizeof(bufferValue));
+
+    const auto expected = de::sizeU32(zPos);
+    if (bufferValue != expected)
+    {
+        std::ostringstream msg;
+        msg << "Unexpected value found in buffer: expected " << expected << " but found " << bufferValue;
+        TCU_FAIL(msg.str());
+    }
+
+    return tcu::TestStatus::pass("Pass");
+}
+
 } // namespace
 
 TestCaseGroup *addHelperInvocationsTests(TestContext &testCtx)
@@ -1934,8 +2495,18 @@ tcu::TestCaseGroup *createMiscTests(tcu::TestContext &testCtx)
     // Miscellaneous ray query tests
     de::MovePtr<tcu::TestCaseGroup> group(new tcu::TestCaseGroup(testCtx, "misc"));
 
-    // Dynamic indexing of ray queries
-    group->addChild(new DynamicIndexingCase(testCtx, "dynamic_indexing"));
+    // Dynamic indexing of ray queries, with and without using the queries first in code.
+    {
+        DynamicIndexingParams params;
+        group->addChild(new DynamicIndexingCase(testCtx, "dynamic_indexing", params));
+
+        params.useFirst = true;
+        group->addChild(new DynamicIndexingCase(testCtx, "dynamic_indexing_use_first", params));
+
+        params.useFirst = false;
+        params.useSpirv = true;
+        group->addChild(new DynamicIndexingCase(testCtx, "dynamic_indexing_inbounds", params));
+    }
 
     addFunctionCaseWithPrograms(group.get(), "reuse_scratch_buffer", checkRayQuerySupport,
                                 initReuseScratchBufferPrograms, reuseScratchBufferInstance);
@@ -1947,6 +2518,47 @@ tcu::TestCaseGroup *createMiscTests(tcu::TestContext &testCtx)
         addFunctionCaseWithPrograms(group.get(), "update_empty_top", checkRayQuerySupport, initEmptyASPrograms,
                                     updateEmptyTopASInstance);
     }
+
+    {
+        const std::array<const char *, 3> singleCaseSuffixes{
+            "_first",
+            "_last",
+            "_middle",
+        };
+        for (const auto wgSize : {61u, 64u, 127u, 128u, 251u, 256u, 509u, 512u, 1021u, 1024u, 0u})
+            for (const bool single : {false, true})
+                for (const int singleCase :
+                     {0, 1, 2}) // First invocation, last invocation, middle invocation, see above.
+                {
+                    if (!single && singleCase != 0) // We only need one "all invocations" case.
+                        break;
+
+                    tcu::Maybe<uint32_t> singleParam = tcu::Nothing;
+                    if (single)
+                    {
+                        if (singleCase == 0)
+                            singleParam = tcu::just(0u);
+                        else if (singleCase == 1)
+                            singleParam = tcu::just(std::numeric_limits<uint32_t>::max());
+                        else if (singleCase == 2)
+                            singleParam = tcu::just(wgSize / 2u);
+                        else
+                            DE_ASSERT(false);
+                    }
+                    RayPerInvParamsPtr params(new RayPerInvParams{
+                        singleParam,
+                        wgSize,
+                    });
+                    const auto &singleCaseSuffix = singleCaseSuffixes.at(singleCase);
+                    const auto testName = "ray_per_inv_" + std::to_string(wgSize) + (single ? "_single" : "_all") +
+                                          (single ? singleCaseSuffix : "");
+                    addFunctionCaseWithPrograms(group.get(), testName, RayPerInvSupport, RayPerInvPrograms,
+                                                RayPerInvRun, params);
+                }
+    }
+
+    addFunctionCaseWithPrograms(group.get(), "preserve_flip_facing", checkRayQuerySupport, initFlipFacingPrograms,
+                                flipFacingRun);
 
     return group.release();
 }

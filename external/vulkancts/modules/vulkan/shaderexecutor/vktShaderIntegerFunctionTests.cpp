@@ -187,7 +187,20 @@ static vector<void *> getInputOutputPointers(const vector<Symbol> &symbols, vect
 
 static std::string getIntegerFuncCaseName(glu::DataType baseType, glu::Precision precision, glu::ShaderType shaderType)
 {
-    return string(glu::getDataTypeName(baseType)) + getPrecisionPostfix(precision) + getShaderTypePostfix(shaderType);
+    std::string baseName = glu::getDataTypeName(baseType);
+    switch (baseType)
+    {
+    case glu::TYPE_INT_VEC5:
+        baseName = "ivec5";
+        break;
+    case glu::TYPE_UINT_VEC5:
+        baseName = "uvec5";
+        break;
+    default:
+        baseName = glu::getDataTypeName(baseType);
+        break;
+    }
+    return baseName + getPrecisionPostfix(precision) + getShaderTypePostfix(shaderType);
 }
 
 static inline uint32_t reverseBits(uint32_t v)
@@ -225,7 +238,12 @@ static void addFunctionCases(tcu::TestCaseGroup *parent, const char *functionNam
         if ((!intTypes && scalarType == glu::TYPE_INT) || (!uintTypes && scalarType == glu::TYPE_UINT))
             continue;
 
-        for (int vecSize = 1; vecSize <= 4; vecSize++)
+#ifndef CTS_USES_VULKANSC
+        int maxVecSize = 5;
+#else
+        int maxVecSize = 4;
+#endif
+        for (int vecSize = 1; vecSize <= maxVecSize; vecSize++)
         {
             for (int prec = glu::PRECISION_MEDIUMP; prec <= glu::PRECISION_HIGHP; prec++)
             {
@@ -235,8 +253,12 @@ static void addFunctionCases(tcu::TestCaseGroup *parent, const char *functionNam
                 for (int shaderTypeNdx = 0; shaderTypeNdx < glu::SHADERTYPE_LAST; shaderTypeNdx++)
                 {
                     if (shaderBits & (1 << shaderTypeNdx))
+                    {
+                        if (vecSize == 5 && shaderTypeNdx != glu::SHADERTYPE_COMPUTE)
+                            continue;
                         group->addChild(new TestClass(parent->getTestContext(), glu::DataType(scalarType + vecSize - 1),
                                                       glu::Precision(prec), glu::ShaderType(shaderTypeNdx)));
+                    }
                 }
             }
         }
@@ -287,24 +309,40 @@ IntegerFunctionCase::~IntegerFunctionCase(void)
 void IntegerFunctionCase::checkSupport(Context &context) const
 {
     checkSupportShader(context, m_shaderType);
+
+#ifndef CTS_USES_VULKANSC
+    bool usesVec5Types = false;
+    for (const auto &symbol : m_spec.inputs)
+    {
+        usesVec5Types = usesVec5Types || (getDataTypeScalarSize(symbol.varType.getBasicType()) == 5);
+    }
+
+    for (const auto &symbol : m_spec.outputs)
+    {
+        usesVec5Types = usesVec5Types || (getDataTypeScalarSize(symbol.varType.getBasicType()) == 5);
+    }
+    if (usesVec5Types && !context.getShaderLongVectorFeaturesEXT().longVector)
+    {
+        TCU_THROW(NotSupportedError, "longVector not supported");
+    }
+#endif
 }
 
 // IntegerFunctionTestInstance
 
-class IntegerFunctionTestInstance : public TestInstance
+class IntegerFunctionTestInstance : public MultiQueueRunnerTestInstance
 {
 public:
     IntegerFunctionTestInstance(Context &context, glu::ShaderType shaderType, const ShaderSpec &spec, int numValues,
                                 const char *name)
-        : TestInstance(context)
+        : MultiQueueRunnerTestInstance(context, shaderType == glu::SHADERTYPE_COMPUTE ? COMPUTE_QUEUE : GRAPHICS_QUEUE)
         , m_shaderType(shaderType)
         , m_spec(spec)
         , m_numValues(numValues)
         , m_name(name)
-        , m_executor(createExecutor(context, m_shaderType, m_spec))
     {
     }
-    virtual tcu::TestStatus iterate(void);
+    virtual tcu::TestStatus queuePass(const QueueData &queueData) override;
 
 protected:
     virtual bool compare(const void *const *inputs, const void *const *outputs) = 0;
@@ -320,12 +358,65 @@ protected:
     const char *m_name;
 
     std::ostringstream m_failMsg; //!< Comparison failure help message.
-
-    de::UniquePtr<ShaderExecutor> m_executor;
 };
 
-tcu::TestStatus IntegerFunctionTestInstance::iterate(void)
+class BitwiseVectorModuloCaseInstance : public IntegerFunctionTestInstance
 {
+public:
+    BitwiseVectorModuloCaseInstance(Context &context, glu::ShaderType shaderType, const ShaderSpec &spec, int numValues,
+                                    const char *name)
+        : IntegerFunctionTestInstance(context, shaderType, spec, numValues, name)
+    {
+    }
+
+    void getInputValues(int numValues, void *const *values) const
+    {
+        int32_t *inputValues = static_cast<int32_t *>(values[0]);
+        for (int ndx = 0; ndx < numValues; ndx++)
+        {
+            inputValues[ndx] = ndx;
+        }
+    }
+
+    bool compare(const void *const *inputs, const void *const *outputs)
+    {
+        DE_UNREF(inputs);
+        const uint32_t outVal = *static_cast<const uint32_t *>(outputs[0]);
+        if (outVal != 0u)
+        {
+            m_failMsg << "Expected 0, got " << outVal;
+            return false;
+        }
+        return true;
+    }
+};
+
+class BitwiseVectorModuloCase : public IntegerFunctionCase
+{
+public:
+    BitwiseVectorModuloCase(tcu::TestContext &testCtx, const char *name, glu::ShaderType shaderType)
+        : IntegerFunctionCase(testCtx, name, shaderType)
+    {
+        m_spec.inputs.push_back(Symbol("input1", glu::VarType(glu::TYPE_INT, glu::PRECISION_HIGHP)));
+        m_spec.outputs.push_back(Symbol("outVal", glu::VarType(glu::TYPE_UINT, glu::PRECISION_HIGHP)));
+        m_spec.source = "// a.y evaluates to (2u | 1u) = 3u. On a buggy driver, the compiler\n"
+                        "// misoptimizes the negation and modulo operations\n"
+                        "uvec2 a = uvec2(input1, 2u) | 1u;\n"
+                        "uint b = ~a.y;\n"
+                        "outVal = b % 2u;\n";
+    }
+
+    TestInstance *createInstance(Context &ctx) const
+    {
+        return new BitwiseVectorModuloCaseInstance(ctx, m_shaderType, m_spec, 1, getName());
+    }
+};
+
+tcu::TestStatus IntegerFunctionTestInstance::queuePass(const QueueData &queueData)
+{
+    const UserQueue userQueue(queueData.handle, queueData.familyIndex);
+    de::UniquePtr<ShaderExecutor> executor(createExecutor(m_context, m_shaderType, m_spec, VK_NULL_HANDLE, userQueue));
+
     const int numInputScalars  = computeTotalScalarSize(m_spec.inputs);
     const int numOutputScalars = computeTotalScalarSize(m_spec.outputs);
     vector<uint32_t> inputData(numInputScalars * m_numValues);
@@ -337,7 +428,7 @@ tcu::TestStatus IntegerFunctionTestInstance::iterate(void)
     getInputValues(m_numValues, &inputPointers[0]);
 
     // Execute shader.
-    m_executor->execute(m_numValues, &inputPointers[0], &outputPointers[0]);
+    executor->execute(m_numValues, &inputPointers[0], &outputPointers[0]);
 
     // Compare results.
     {
@@ -1265,6 +1356,10 @@ void ShaderIntegerFunctionTests::init(void)
     addFunctionCases<BitCountCase>(this, "bitcount", true, true, true, ALL_SHADERS);
     addFunctionCases<FindLSBCase>(this, "findlsb", true, true, true, ALL_SHADERS);
     addFunctionCases<findMSBCase>(this, "findMSB", true, true, true, ALL_SHADERS);
+
+    tcu::TestCaseGroup *group = new tcu::TestCaseGroup(getTestContext(), "bitwise_vector_modulo");
+    group->addChild(new BitwiseVectorModuloCase(getTestContext(), "uvec2_compute", glu::SHADERTYPE_COMPUTE));
+    this->addChild(group);
 }
 
 } // namespace shaderexecutor

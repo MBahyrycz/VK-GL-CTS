@@ -35,7 +35,6 @@
 #include <algorithm>
 #include <filesystem>
 #include <numeric>
-#include <chrono>
 
 #ifdef DE_BUILD_VIDEO
 #include <vulkan_video_encoder.h>
@@ -55,15 +54,15 @@ static uint32_t getMaxFrameCount();
 namespace
 {
 using namespace vk;
-using namespace std;
 
 using de::MovePtr;
 using vkt::ycbcr::getYCbCrBitDepth;
-using vkt::ycbcr::getYCbCrFormatChannelCount;
 using vkt::ycbcr::isXChromaSubsampled;
 using vkt::ycbcr::isYChromaSubsampled;
 
-#define PSNR_THRESHOLD_LOWER_LIMIT 50.0
+#ifdef DE_BUILD_VIDEO
+static constexpr double PSNR_THRESHOLD_LOWER_LIMIT = 50.0;
+#endif
 
 bool checkClipFileExists(const std::string &clipName);
 void removeClip(const std::string &clipName);
@@ -366,7 +365,7 @@ VkExtent2D VideoTestCase::codedPictureAlignment = VkExtent2D({0, 0});
 
 static void buildTestName(const TestDefinition &testDef, std::string &testName);
 
-static void buildClipName(tcu::TestContext &testCtx, const TestDefinition &testDef, std::string &clipName, bool output)
+static void buildInputClipName(tcu::TestContext &testCtx, const TestDefinition &testDef, std::string &clipName)
 {
     auto &cmdLine   = testCtx.getCommandLine();
     auto archiveDir = cmdLine.getArchiveDir();
@@ -377,18 +376,16 @@ static void buildClipName(tcu::TestContext &testCtx, const TestDefinition &testD
 
     clipName += "_" + std::string(testDef.subsampling.subName);
     clipName += "_" + std::string(testDef.bitDepth.subName);
+    clipName += ".yuv";
+}
 
-    if (output)
-    {
-        clipName += "_" + std::string(testDef.gop.subName);
-        clipName += "_" + std::to_string(testDef.gop.frameCount);
-        std::string testName("");
-        buildTestName(testDef, testName);
-        clipName += "_" + testName;
-        clipName += ".ivf";
-    }
-    else
-        clipName += ".yuv";
+// Mirrors the "<width>x<height>_<bitDepth>_<subsampling>_<gop>_<frameCount>" case-group path built in
+// createVideoEncodeTestsAV1, so dump filenames match the dEQP case they belong to.
+static std::string buildClipDescriptor(const TestDefinition &testDef)
+{
+    return std::to_string(testDef.frameSize.width) + "x" + std::to_string(testDef.frameSize.height) + "_" +
+           testDef.bitDepth.subName + "_" + testDef.subsampling.subName + "_" + testDef.gop.subName + "_" +
+           std::to_string(testDef.gop.frameCount);
 }
 
 VkVideoChromaSubsamplingFlagsKHR getChromaSubSampling(enum ChromaSubsampling subSampling)
@@ -403,7 +400,7 @@ VkVideoChromaSubsamplingFlagsKHR getChromaSubSampling(enum ChromaSubsampling sub
         return VK_VIDEO_CHROMA_SUBSAMPLING_422_BIT_KHR;
     case CHROMA_SS_444:
         return VK_VIDEO_CHROMA_SUBSAMPLING_444_BIT_KHR;
-    };
+    }
     return VK_VIDEO_CHROMA_SUBSAMPLING_INVALID_KHR;
 }
 
@@ -417,7 +414,7 @@ VkVideoComponentBitDepthFlagBitsKHR getBitDepth(enum BitDepth bitDepth)
         return VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
     case BIT_DEPTH_12:
         return VK_VIDEO_COMPONENT_BIT_DEPTH_12_BIT_KHR;
-    };
+    }
     return VK_VIDEO_COMPONENT_BIT_DEPTH_INVALID_KHR;
 }
 
@@ -428,6 +425,7 @@ tcu::TestStatus VideoTestInstance::iterate(void)
 
 #ifdef DE_BUILD_VIDEO
     int64_t frameNumEncoded = 0;
+    bool allFramesEncoded   = true;
 
     // Encode all frames
     int64_t totalFrames = m_encoder->GetNumberOfFrames();
@@ -436,18 +434,20 @@ tcu::TestStatus VideoTestInstance::iterate(void)
         VkResult result = m_encoder->EncodeNextFrame(frameNumEncoded);
         if (result != VK_SUCCESS)
         {
-            status = tcu::TestStatus::fail("Failed to encode frame " + de::toString(i));
+            status           = tcu::TestStatus::fail("Failed to encode frame " + de::toString(i));
+            allFramesEncoded = false;
             break;
         }
         result = m_encoder->GetBitstream();
         if (result != VK_SUCCESS)
         {
-            status = tcu::TestStatus::fail("Failed to get bitstream for frame " + de::toString(i));
+            status           = tcu::TestStatus::fail("Failed to get bitstream for frame " + de::toString(i));
+            allFramesEncoded = false;
             break;
         }
     }
 
-    if (frameNumEncoded + 1 == totalFrames)
+    if (allFramesEncoded && frameNumEncoded + 1 == totalFrames)
     {
         status = validateEncodedContent(
             VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR, STD_VIDEO_AV1_PROFILE_MAIN, m_outputClipFilename.c_str(),
@@ -497,10 +497,13 @@ TestInstance *VideoTestCase::createInstance(Context &ctx) const
     buildEncoderParams(encoderParams);
 
     std::string inputClipName("");
-    buildClipName(getTestContext(), m_definition, inputClipName, false);
+    buildInputClipName(getTestContext(), m_definition, inputClipName);
 
-    std::string outputClipName("");
-    buildClipName(getTestContext(), m_definition, outputClipName, true);
+    std::string testName("");
+    buildTestName(m_definition, testName);
+    std::string clipDescriptor = buildClipDescriptor(m_definition) + "_" + testName;
+    std::string encodePrefix   = util::getVideoCodecPathSegment(VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR);
+    std::string outputClipName = util::getVideoDumpPath(true, clipDescriptor, encodePrefix, "ivf");
 
     args.push_back("vk-gl-cts"); //args needs the appname as a first argument
     args.push_back("-i");
@@ -525,7 +528,7 @@ TestInstance *VideoTestCase::createInstance(Context &ctx) const
         std::cerr << "TEST ARGS: ";
         for (auto &arg : args)
             std::cerr << arg << " ";
-        std::cerr << endl;
+        std::cerr << std::endl;
     }
 
     if (!checkClipFileExists(inputClipName))
@@ -547,8 +550,8 @@ TestInstance *VideoTestCase::createInstance(Context &ctx) const
         expectedOutputExtent.height = de::roundUp(h, codedPictureAlignment.height);
     }
 #ifdef DE_BUILD_VIDEO
-    VkResult result = CreateVulkanVideoEncoder(m_requirements.codecOperation, static_cast<int>(args.size()),
-                                               const_cast<char **>(args.data()), encoder);
+    VkResult result =
+        CreateVulkanVideoEncoder(m_requirements.codecOperation, static_cast<int>(args.size()), args.data(), encoder);
     if (result != VK_SUCCESS)
     {
         throw tcu::TestError("Failed to create VulkanVideoEncoder");
@@ -563,6 +566,8 @@ TestInstance *VideoTestCase::createInstance(Context &ctx) const
 
 void VideoTestCase::checkSupport(Context &ctx) const
 {
+    VideoDevice::checkSupport(ctx, m_requirements.codecOperation);
+
     for (const auto &extension : m_requirements.extensions)
     {
         if (!ctx.isDeviceFunctionalitySupported(extension.c_str()))
@@ -584,7 +589,7 @@ void VideoTestCase::checkSupport(Context &ctx) const
 void VideoTestCase::validateCapabilities(Context &context) const
 {
     const VkVideoCodecOperationFlagBitsKHR videoCodecEncodeOperation = m_requirements.codecOperation;
-    const VkImageUsageFlags usageFlag                                = VK_VIDEO_ENCODE_USAGE_DEFAULT_KHR;
+    const VkVideoEncodeUsageFlagBitsKHR usageFlag                    = VK_VIDEO_ENCODE_USAGE_DEFAULT_KHR;
     const VkImageUsageFlags imageFlag                                = VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
 
     const VkVideoEncodeAV1ProfileInfoKHR encodeProfileInfo = {
@@ -684,7 +689,7 @@ void VideoTestCase::validateCapabilities(Context &context) const
         }
     }
 
-    MovePtr<vector<VkFormat>> supportedFormats =
+    MovePtr<std::vector<VkFormat>> supportedFormats =
         getSupportedFormats(vki, physicalDevice, imageFlag, videoEncodeProfileList.get());
 
     if (!supportedFormats || supportedFormats->empty())
@@ -704,13 +709,6 @@ void VideoTestCase::validateCapabilities(Context &context) const
         {
             continue;
         }
-
-        // TODO nessery ?
-        // uint32_t channelCount = getYCbCrFormatChannelCount(supportedFormat);
-        // if (channelCount < 3) // Assuming we need at least 3 channels (Y, Cb, Cr)
-        // {
-        //     continue;
-        // }
 
         formatFound = true;
         break;
@@ -859,7 +857,7 @@ void VideoTestCase::buildEncoderParams(std::vector<std::string> &params) const
     }
 
     params.push_back("--inputChromaSubsampling");
-    params.push_back(std::to_string(m_definition.subsampling.subsampling).c_str());
+    params.push_back(std::to_string(m_definition.subsampling.subsampling));
 
     params.push_back("--inputBpp");
     params.push_back(std::to_string(m_definition.bitDepth.depth));
@@ -1040,8 +1038,8 @@ bool validateTestDefinition(const TestDefinition &testDef)
         return false;
     }
 
-    // Test only GOP_I_P_B in the case of resolution different from 720x480
-    if (testDef.frameSize.width != 720 && testDef.frameSize.height != 480 && (testDef.gop.gop != GOP_I_P_B))
+    // Test only GOP_I_P in the case of resolution different from 720x480
+    if (testDef.frameSize.width != 720 && testDef.frameSize.height != 480 && (testDef.gop.gop != GOP_I_P))
         return false;
 
     // Remove TILING_1x2 from 7680x4320 resolution as it is not supported by the AV1 specification
@@ -1124,8 +1122,8 @@ void buildTestRequirements(const TestDefinition &testDef, TestRequirements &requ
 
     requirements.requireBFrames = (testDef.gop.gop == GOP_I_P_B || testDef.gop.gop == GOP_IDR_P_B);
 
-    requirements.useVariableBitrate = (testDef.quantization.qIndex != 0);
-    requirements.useConstantBitrate = false;
+    requirements.useVariableBitrate = (testDef.rateControl.rc == RC_VBR);
+    requirements.useConstantBitrate = (testDef.rateControl.rc == RC_CBR);
 
     requirements.superblockSizes = (testDef.superblock.superblock == SUPERBLOCK_64x64) ?
                                        VK_VIDEO_ENCODE_AV1_SUPERBLOCK_SIZE_64_BIT_KHR :

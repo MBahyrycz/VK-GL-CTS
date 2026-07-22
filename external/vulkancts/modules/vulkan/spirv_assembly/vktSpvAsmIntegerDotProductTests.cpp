@@ -102,18 +102,19 @@ bool compareDotProductAccSat(const std::vector<Resource> &inputs, const vector<A
     vector<uint8_t> rhsBytes;
     vector<uint8_t> addendBytes;
 
-    inputs[0].getBytes(lhsBytes);
-    inputs[1].getBytes(rhsBytes);
-    inputs[2].getBytes(addendBytes);
+    inputs[0].buffer->getBytes(lhsBytes);
+    inputs[1].buffer->getBytes(rhsBytes);
+    inputs[2].buffer->getBytes(addendBytes);
 
     const AddendT *const output      = static_cast<AddendT *const>(outputAllocs[0]->getHostPtr());
     const AddendT *const addends     = reinterpret_cast<AddendT *const>(&addendBytes.front());
     const LHSOperandT *const lhsInts = reinterpret_cast<LHSOperandT *const>(&lhsBytes.front());
     const RHSOperandT *const rhsInts = reinterpret_cast<RHSOperandT *const>(&rhsBytes.front());
 
-    for (size_t idx = 0; idx < inputs[2].getByteSize() / sizeof(AddendT); ++idx)
+    for (size_t idx = 0; idx < inputs[2].buffer->getByteSize() / sizeof(AddendT); ++idx)
     {
-        size_t vecLen = (inputs[0].getByteSize() / sizeof(LHSOperandT)) / (inputs[2].getByteSize() / sizeof(AddendT));
+        size_t vecLen = (inputs[0].buffer->getByteSize() / sizeof(LHSOperandT)) /
+                        (inputs[2].buffer->getByteSize() / sizeof(AddendT));
 
         std::vector<LHSOperandT> inputVec1Pos;
         std::vector<RHSOperandT> inputVec2Pos;
@@ -213,6 +214,8 @@ void addDotProductExtensionAndFeatures(ComputeShaderSpec &spec, const struct Dot
     {
         spec.requestedVulkanFeatures.coreFeatures.shaderInt16                 = true;
         spec.requestedVulkanFeatures.ext16BitStorage.storageBuffer16BitAccess = true;
+        // VUID-RuntimeSpirv-uniformAndStorageBuffer16BitAccess-06332
+        spec.requestedVulkanFeatures.ext16BitStorage.uniformAndStorageBuffer16BitAccess = true;
         spec.extensions.push_back("VK_KHR_16bit_storage");
     }
 }
@@ -364,9 +367,10 @@ string generateIntegerDotProductCode(const struct DotProductPackingInfo &packing
                                        "OpCapability Int" + de::toString(vectorInfo.vecElementSize) + "\n" :
                                        "");
 
-    const string dotProductInputCapabilityName(packingInfo.packed              ? "DotProductInput4x8BitPackedKHR" :
-                                               (vectorInfo.vecElementSize > 8) ? "DotProductInputAllKHR" :
-                                                                                 "DotProductInput4x8BitKHR");
+    const bool using4Wide8ByteVector = (vectorInfo.vecLen == 4) && (vectorInfo.vecElementSize == 8);
+    const string dotProductInputCapabilityName(!using4Wide8ByteVector ? "DotProductInputAllKHR" :
+                                               packingInfo.packed     ? "DotProductInput4x8BitPackedKHR" :
+                                                                        "DotProductInput4x8BitKHR");
 
     const string capabilities(outputCapability + elementCapability + "OpCapability " + dotProductInputCapabilityName +
                               "\n"

@@ -1,28 +1,10 @@
+# Vulkan video support libraries
+
 
 include_directories(..)
-if (DE_OS_IS_WIN32 OR DE_OS_IS_UNIX)
-	include_directories(${VULKAN_VIDEO_PARSER_INCLUDE_DIRS})
-	include_directories(${VULKAN_VIDEO_ENCODER_INCLUDE_DIRS})
-	include_directories(${VIDEO_GENERATOR_INCLUDE_DIR})
-	include_directories(.)
+include_directories(.)
 
-	add_compile_definitions(ENABLE_AV1_DECODER)
-	add_compile_definitions(DE_BUILD_VIDEO)
-endif()
-
-set(DEQP_VK_VIDEO_SRC_TARGET_DEPENDENT
-	vktDemuxer.hpp
-	vktDemuxer.cpp
-	vktBufferedReader.hpp
-	vktVideoBaseDecodeUtils.hpp
-	vktVideoBaseDecodeUtils.cpp
-	vktVideoFrameBuffer.hpp
-	vktVideoFrameBuffer.cpp
-	vktBitstreamBufferImpl.hpp
-	vktBitstreamBufferImpl.cpp
-	)
-
-set(DEQP_VK_VIDEO_SRCS_TARGET_INDEPENDENT
+set(DEQP_VK_VIDEO_SRCS_CORE
 	vktVideoCapabilitiesTests.cpp
 	vktVideoCapabilitiesTests.hpp
 	vktVideoDecodeTests.cpp
@@ -30,6 +12,8 @@ set(DEQP_VK_VIDEO_SRCS_TARGET_INDEPENDENT
 	vktVideoEncodeTests.cpp
 	vktVideoEncodeTests.hpp
 	vktVideoEncodeTestsAV1.cpp
+	vktVideoProfilesValidationTests.cpp
+	vktVideoProfilesValidationTests.hpp
 	vktVideoTestUtils.cpp
 	vktVideoTestUtils.hpp
 	vktVideoTests.cpp
@@ -38,21 +22,42 @@ set(DEQP_VK_VIDEO_SRCS_TARGET_INDEPENDENT
 	vktVideoClipInfo.hpp
 	)
 
-if (DE_OS_IS_WIN32 OR DE_OS_IS_UNIX)
-	set(DEQP_VK_VIDEO_SRCS
-		${DEQP_VK_VIDEO_SRC_TARGET_DEPENDENT}
-		${DEQP_VK_VIDEO_SRCS_TARGET_INDEPENDENT}
-		)
+if (NOT DEQP_DISABLE_VK_VIDEO_TESTS)
+	# Video parser and encoder library
+	add_subdirectory(${CMAKE_SOURCE_DIR}/external/vulkan-video-samples ${CMAKE_BINARY_DIR}/external/vulkan-video-samples EXCLUDE_FROM_ALL)
+	# YUV Video generator library
+	add_subdirectory(${CMAKE_SOURCE_DIR}/external/video_generator ${CMAKE_BINARY_DIR}/external/video_generator EXCLUDE_FROM_ALL)
+	include_directories(${VULKAN_VIDEO_PARSER_INCLUDE_DIRS})
+	include_directories(${VULKAN_VIDEO_ENCODER_INCLUDE_DIRS})
+	include_directories(${VIDEO_GENERATOR_INCLUDE_DIR})
+	set(DEQP_VK_VIDEO_SRCS_EXTERNAL_DEPS
+		vktDemuxer.hpp
+		vktDemuxer.cpp
+		vktBufferedReader.hpp
+		vktVideoBaseDecodeUtils.hpp
+		vktVideoBaseDecodeUtils.cpp
+		vktVideoFrameBuffer.hpp
+		vktVideoFrameBuffer.cpp
+		vktBitstreamBufferImpl.hpp
+		vktBitstreamBufferImpl.cpp
+	)
+
+	message(STATUS "Vulkan Video Tests: ENABLED (external dependencies required)")
 else()
-	set(DEQP_VK_VIDEO_SRCS ${DEQP_VK_VIDEO_SRCS_TARGET_INDEPENDENT})
+	message(STATUS "Vulkan Video Tests: DISABLED (tests will report NotSupported)")
 endif()
+
+set(DEQP_VK_VIDEO_SRCS
+	${DEQP_VK_VIDEO_SRCS_CORE}
+	${DEQP_VK_VIDEO_SRCS_EXTERNAL_DEPS}
+	)
 
 set(DEQP_VK_VIDEO_LIBS
 	tcutil
 	vkutil
 	)
 
-if (DE_OS_IS_WIN32 OR DE_OS_IS_UNIX)
+if (NOT DEQP_DISABLE_VK_VIDEO_TESTS)
 	list(APPEND DEQP_VK_VIDEO_LIBS
 		${VULKAN_VIDEO_PARSER_LIBRARY}
 		${VULKAN_VIDEO_ENCODER_LIBRARY}
@@ -63,7 +68,8 @@ endif()
 PCH(DEQP_VK_VIDEO_SRCS ../pch.cpp)
 
 add_library(deqp-vk-video STATIC ${DEQP_VK_VIDEO_SRCS})
-target_link_libraries(deqp-vk-video deqp-vk-synchronization deqp-vk-image-util deqp-vk-ycbcr-util ${DEQP_VK_VIDEO_LIBS})
+target_link_libraries(deqp-vk-video deqp-vk-synchronization deqp-vk-image-util deqp-vk-ycbcr-util deqp-vk-video-config ${DEQP_VK_VIDEO_LIBS})
+
 if (DE_OS_IS_UNIX)
 	# TODO: The NVIDIA samples app has hundreds of these warnings.
 	target_compile_options(deqp-vk-video PRIVATE "-Wno-conversion" "-Wno-sign-compare")

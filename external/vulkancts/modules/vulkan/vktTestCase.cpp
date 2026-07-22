@@ -5,7 +5,6 @@
  * Copyright (c) 2015 Google Inc.
  * Copyright (c) 2023 LunarG, Inc.
  * Copyright (c) 2023 Nintendo
- * Copyright (c) 2024-2025 Arm Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -79,13 +78,14 @@ vector<string> filterExtensions(const vector<VkExtensionProperties> &extensions)
         "VK_NV_ray_tracing",
         "VK_NV_inherited_viewport_scissor",
         "VK_NV_mesh_shader",
-        "VK_AMD_mixed_attachment_samples",
         "VK_AMD_buffer_marker",
+        "VK_AMD_gpa_interface",
+        "VK_AMD_mixed_attachment_samples",
+        "VK_AMD_shader_early_and_late_fragment_tests",
         "VK_AMD_shader_explicit_vertex_parameter",
         "VK_AMD_shader_image_load_store_lod",
         "VK_AMD_shader_trinary_minmax",
         "VK_AMD_texture_gather_bias_lod",
-        "VK_AMD_shader_early_and_late_fragment_tests",
         "VK_ANDROID_external_memory_android_hardware_buffer",
         "VK_ANDROID_external_format_resolve",
         "VK_VALVE_mutable_descriptor_type",
@@ -110,10 +110,16 @@ vector<string> filterExtensions(const vector<VkExtensionProperties> &extensions)
         "VK_NV_linear_color_attachment",
         "VK_NV_cooperative_matrix2",
         "VK_NV_cooperative_vector",
+        "VK_NV_low_latency2",
         "VK_QCOM_fragment_density_map_offset",
+        "VK_NV_command_buffer_inheritance",
+        "VK_NV_push_constant_bank",
         "VK_QCOM_image_processing",
         "VK_ARM_performance_counters_by_region",
         "VK_IMG_format_pvrtc",
+        "VK_QCOM_multiview_per_view_viewports",
+        "VK_QCOM_multiview_per_view_render_areas",
+        "VK_VALVE_fragment_density_map_layered",
     };
 
     const char *exclusions[] = {"VK_EXT_device_address_binding_report", "VK_EXT_device_memory_report"};
@@ -335,10 +341,9 @@ Move<VkDevice> createDefaultDevice(const PlatformInterface &vkp, VkInstance inst
                                    de::SharedPtr<vk::ResourceInterface> resourceInterface)
 {
     VkDeviceQueueCreateInfo queueInfo[4];
-    VkDeviceCreateInfo deviceInfo;
-    vector<const char *> enabledLayers;
-    const float queuePriority = 1.0f;
-    uint32_t numQueues        = 1;
+    VkDeviceCreateInfo deviceInfo = initVulkanStructure();
+    const float queuePriority     = 1.0f;
+    uint32_t numQueues            = 1;
 
     deMemset(&queueInfo, 0, sizeof(queueInfo));
 
@@ -382,23 +387,12 @@ Move<VkDevice> createDefaultDevice(const PlatformInterface &vkp, VkInstance inst
         numQueues++;
     }
 
-    if (cmdLine.isValidationEnabled())
-    {
-        enabledLayers = vkt::getValidationLayers(vki, physicalDevice);
-        if (enabledLayers.empty())
-            TCU_THROW(NotSupportedError, "No validation layers found");
-    }
-
-    deMemset(&deviceInfo, 0, sizeof(deviceInfo));
     // VK_KHR_get_physical_device_properties2 is used if enabledFeatures.pNext != 0
-    deviceInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext                   = enabledFeatures.pNext ? &enabledFeatures : nullptr;
     deviceInfo.queueCreateInfoCount    = numQueues;
     deviceInfo.pQueueCreateInfos       = queueInfo;
     deviceInfo.enabledExtensionCount   = de::sizeU32(usedExtensions);
     deviceInfo.ppEnabledExtensionNames = de::dataOrNull(usedExtensions);
-    deviceInfo.enabledLayerCount       = de::sizeU32(enabledLayers);
-    deviceInfo.ppEnabledLayerNames     = de::dataOrNull(enabledLayers);
     deviceInfo.pEnabledFeatures        = enabledFeatures.pNext ? nullptr : &enabledFeatures.features;
 
 #ifdef CTS_USES_VULKANSC
@@ -469,6 +463,7 @@ Move<VkDevice> createDefaultDevice(const PlatformInterface &vkp, VkInstance inst
     }
 
 #else
+    DE_UNREF(cmdLine);
     DE_UNREF(resourceInterface);
 #endif // CTS_USES_VULKANSC
 
@@ -488,6 +483,15 @@ int findQueueFamilyIndexWithCapsNoThrow(const InstanceInterface &vkInstance, VkP
     {
         return -1;
     }
+}
+
+static uint32_t findComputeCapableQueueFamily(const InstanceInterface &vkInstance, VkPhysicalDevice physicalDevice)
+{
+    int idx = findQueueFamilyIndexWithCapsNoThrow(vkInstance, physicalDevice,
+                                                  VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0u);
+    if (idx >= 0)
+        return static_cast<uint32_t>(idx);
+    return findQueueFamilyIndexWithCaps(vkInstance, physicalDevice, VK_QUEUE_COMPUTE_BIT);
 }
 
 uint32_t findQueueFamilyIndexWithCaps(const InstanceInterface &vkInstance, VkPhysicalDevice physicalDevice,
@@ -796,29 +800,39 @@ vector<const char *> removeCoreExtensions(const uint32_t apiVersion, const vecto
 
 } // namespace
 
-InstCaps::InstCaps(const PlatformInterface &vkPlatform, const tcu::CommandLine &commandLine, const std::string &id_)
+InstCaps::InstCaps(const PlatformInterface &vkPlatform, const tcu::CommandLine &commandLine, const std::string &id_,
+                   vkt::TestCase *testCase, const InstCaps *hint, bool dontCreateDefaultDeviceFlag)
 #ifndef CTS_USES_VULKANSC
     : maximumFrameworkVulkanVersion(VK_API_MAX_FRAMEWORK_VERSION)
 #else
     : maximumFrameworkVulkanVersion(VKSC_API_MAX_FRAMEWORK_VERSION)
 #endif // CTS_USES_VULKANSC
-    , availableInstanceVersion(getTargetInstanceVersion(vkPlatform))
+    , availableInstanceVersion(hint ? hint->availableInstanceVersion : getTargetInstanceVersion(vkPlatform))
     , usedInstanceVersion(
-          sanitizeApiVersion(minVulkanAPIVersion(availableInstanceVersion, maximumFrameworkVulkanVersion)))
-    , deviceVersions(determineDeviceVersions(vkPlatform, usedInstanceVersion, commandLine))
-    , usedApiVersion(sanitizeApiVersion(minVulkanAPIVersion(usedInstanceVersion, deviceVersions.first)))
-    , coreExtensions(addCoreInstanceExtensions(
-          filterExtensions(enumerateInstanceExtensionProperties(vkPlatform, nullptr)), usedApiVersion))
+          hint ? hint->usedInstanceVersion :
+                 sanitizeApiVersion(minVulkanAPIVersion(availableInstanceVersion, maximumFrameworkVulkanVersion)))
+    , deviceVersions(hint ? hint->deviceVersions :
+                            determineDeviceVersions(vkPlatform, usedInstanceVersion, commandLine))
+    , usedApiVersion(hint ? hint->usedApiVersion :
+                            sanitizeApiVersion(minVulkanAPIVersion(usedInstanceVersion, deviceVersions.first)))
+    , coreExtensions(
+          hint ? hint->coreExtensions :
+                 addCoreInstanceExtensions(filterExtensions(enumerateInstanceExtensionProperties(vkPlatform, nullptr)),
+                                           usedApiVersion))
     , id(id_)
     , m_extensions()
+    , m_destroyAllDevices({false, false})
+    , m_dontCreateDefaultDevice(dontCreateDefaultDeviceFlag)
+    , m_shouldRemoveInstanceOnTestExit(false)
+    , m_testCase(testCase)
 {
 }
 
 // "Define the ContextManager constructor, placed here as a workaround for an older Fedora version
 // where the compiler fails to locate function implementations unless they reside in the same file.
 ContextManager::ContextManager(const PlatformInterface &vkPlatform, const tcu::CommandLine &commandLine,
-                               [[maybe_unused]] de::SharedPtr<vk::ResourceInterface> resourceInterface,
-                               int maxCustomDevices, const InstCaps &icaps, ContextManager::Det_)
+                               de::SharedPtr<vk::ResourceInterface> resourceInterface, int maxCustomDevices,
+                               const InstCaps &icaps, ContextManager::Det_)
     : m_maximumFrameworkVulkanVersion(icaps.maximumFrameworkVulkanVersion)
     , m_platformInterface(vkPlatform)
     , m_commandLine(commandLine)
@@ -849,7 +863,8 @@ ContextManager::ContextManager(const PlatformInterface &vkPlatform, const tcu::C
                                                                 *m_instance) :
                                 DebugReportCallbackPtr())
 #endif
-    , m_physicalDevice(chooseDevice(*m_instanceInterface, *m_instance, m_commandLine))
+    , m_physicalDevice(icaps.selectDevice(*m_instanceInterface, *m_instance, commandLine,
+                                          chooseDevice(*m_instanceInterface, *m_instance, m_commandLine)))
     , m_deviceVersion(getPhysicalDeviceProperties(*m_instanceInterface, m_physicalDevice).apiVersion)
     , m_maxCustomDevices(maxCustomDevices)
     , m_deviceExtensions(addCoreDeviceExtensions(
@@ -862,6 +877,10 @@ ContextManager::ContextManager(const PlatformInterface &vkPlatform, const tcu::C
                                                  m_instanceExtensions, m_deviceExtensions))
     , m_deviceFeaturesAndProperties(new DevFeaturesAndProperties(*m_deviceFeaturesPtr, *m_devicePropertiesPtr))
     , m_contexts()
+    , m_customManagers()
+    , m_destroyAllDevices(icaps.getDestroyAllDevices())
+    , m_dontCreateDefaultDevice(icaps.dontCreateDefaultDevice())
+    , m_shouldBeRemovedOnTestExit(icaps.shouldRemoveInstanceOnTestExit())
     , id(icaps.id)
 {
     m_contexts.reserve(m_maxCustomDevices + 1);
@@ -900,9 +919,7 @@ DefaultDevice::DefaultDevice(const PlatformInterface &vkPlatform, const tcu::Com
     , m_deviceExtensions((deviceID != DevCaps::DefDevId) ? *pDeviceExtensions : m_contextManager->getDeviceExtensions())
     , m_deviceFeaturesPtr(m_contextManager->getDeviceFeaturesPtr())
     , m_deviceFeatures(*m_deviceFeaturesPtr)
-    , m_universalQueueFamilyIndex(findQueueFamilyIndexWithCaps(
-          *m_instanceInterface, m_physicalDevice,
-          cmdLine.isComputeOnly() ? VK_QUEUE_COMPUTE_BIT : VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))
+    , m_universalQueueFamilyIndex(findComputeCapableQueueFamily(*m_instanceInterface, m_physicalDevice))
 #ifndef CTS_USES_VULKANSC
     , m_sparseQueueFamilyIndex(
           m_deviceFeatures.getCoreFeatures2().features.sparseBinding ?
@@ -1781,6 +1798,12 @@ DevCaps::QueueInfo Context::getDeviceQueueInfo(uint32_t queueIndex)
     return m_deviceRuntimeData->getQueue(getDeviceInterface(), getDevice(), queueIndex, isDefaultContext());
 }
 
+uint32_t Context::getDeviceQueueCount() const
+{
+    DE_ASSERT(m_deviceRuntimeData);
+    return m_deviceRuntimeData->getQueueCount();
+}
+
 void Context::collectAndReportDebugMessages()
 {
 #ifndef CTS_USES_VULKANSC
@@ -1796,6 +1819,11 @@ void TestCase::initPrograms(SourceCollections &) const
 {
 }
 
+bool TestCase::needsRebuildPrograms(TestCase const *, Context &) const
+{
+    return true;
+}
+
 void TestCase::checkSupport(Context &) const
 {
 }
@@ -1808,37 +1836,49 @@ MultiQueueRunnerTestInstance::MultiQueueRunnerTestInstance(Context &context, Que
     : TestInstance(context)
     , m_queueCaps(queueCaps)
 {
-    // building vector of unique queues
-    if (m_queueCaps == QueueCapabilities::GRAPHICS_QUEUE)
+    if (!context.isDefaultContext())
     {
-        m_queues.emplace_back(context.getUniversalQueue(), (uint32_t)context.getUniversalQueueFamilyIndex());
-    }
-    else if (m_queueCaps == QueueCapabilities::COMPUTE_QUEUE)
-    {
-        // universal queue supports compute
-        m_queues.emplace_back(context.getUniversalQueue(), (uint32_t)context.getUniversalQueueFamilyIndex());
-        // checking for other queue that supports compute
-        if ((m_context.getComputeQueueFamilyIndex() != -1))
+        const uint32_t queueCount = context.getDeviceQueueCount();
+        for (uint32_t i = 0; i < queueCount; ++i)
         {
-            m_queues.emplace_back(context.getComputeQueue(), (uint32_t)context.getComputeQueueFamilyIndex());
-        }
-    }
-    else if (m_queueCaps == QueueCapabilities::TRANSFER_QUEUE)
-    {
-        // all queues support transfer
-        m_queues.emplace_back(context.getUniversalQueue(), (uint32_t)context.getUniversalQueueFamilyIndex());
-        if ((m_context.getComputeQueueFamilyIndex() != -1))
-        {
-            m_queues.emplace_back(context.getComputeQueue(), (uint32_t)context.getComputeQueueFamilyIndex());
-        }
-        if ((m_context.getTransferQueueFamilyIndex() != -1))
-        {
-            m_queues.emplace_back(context.getTransferQueue(), (uint32_t)context.getTransferQueueFamilyIndex());
+            auto qInfo = context.getDeviceQueueInfo(i);
+            m_queues.emplace_back(qInfo.queue, qInfo.familyIndex);
         }
     }
     else
     {
-        DE_ASSERT(false);
+        if (m_queueCaps == QueueCapabilities::GRAPHICS_QUEUE)
+        {
+            m_queues.emplace_back(context.getUniversalQueue(), (uint32_t)context.getUniversalQueueFamilyIndex());
+        }
+        else if (m_queueCaps == QueueCapabilities::COMPUTE_QUEUE)
+        {
+            m_queues.emplace_back(context.getUniversalQueue(), (uint32_t)context.getUniversalQueueFamilyIndex());
+            if ((m_context.getComputeQueueFamilyIndex() != -1) &&
+                ((uint32_t)m_context.getComputeQueueFamilyIndex() != context.getUniversalQueueFamilyIndex()))
+            {
+                m_queues.emplace_back(context.getComputeQueue(), (uint32_t)context.getComputeQueueFamilyIndex());
+            }
+        }
+        else if (m_queueCaps == QueueCapabilities::TRANSFER_QUEUE)
+        {
+            m_queues.emplace_back(context.getUniversalQueue(), (uint32_t)context.getUniversalQueueFamilyIndex());
+            if ((m_context.getComputeQueueFamilyIndex() != -1) &&
+                ((uint32_t)m_context.getComputeQueueFamilyIndex() != context.getUniversalQueueFamilyIndex()))
+            {
+                m_queues.emplace_back(context.getComputeQueue(), (uint32_t)context.getComputeQueueFamilyIndex());
+            }
+            if ((m_context.getTransferQueueFamilyIndex() != -1) &&
+                ((uint32_t)m_context.getTransferQueueFamilyIndex() != context.getUniversalQueueFamilyIndex()) &&
+                (m_context.getTransferQueueFamilyIndex() != m_context.getComputeQueueFamilyIndex()))
+            {
+                m_queues.emplace_back(context.getTransferQueue(), (uint32_t)context.getTransferQueueFamilyIndex());
+            }
+        }
+        else
+        {
+            DE_ASSERT(false);
+        }
     }
 
     if (m_queues.empty())
@@ -1893,6 +1933,11 @@ void TestCase::initInstanceCapabilities(InstCaps &caps)
     TCU_THROW(EnforceDefaultInstance,
               "Default implementation of TestCase::initInstanceCapabilities()."
               "If the test provides getInstanceCapabilities() then it must provide initInstanceCapabilities() as well");
+}
+
+VkPhysicalDevice TestCase::selectPhysicalDevice(const InstanceInterface &, VkInstance, const tcu::CommandLine &)
+{
+    return VK_NULL_HANDLE;
 }
 
 void TestCase::setContextManager(de::SharedPtr<const ContextManager> cm)

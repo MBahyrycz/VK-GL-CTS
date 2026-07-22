@@ -26,20 +26,16 @@
 #include "vktSpvAsmFloatControlsTests.hpp"
 #include "vktSpvAsmComputeShaderCase.hpp"
 #include "vktSpvAsmGraphicsShaderTestUtil.hpp"
-#include "vktTestGroupUtil.hpp"
 #include "tcuFloat.hpp"
 #include "tcuFloatFormat.hpp"
 #include "tcuStringTemplate.hpp"
 #include "deUniquePtr.hpp"
 #include "deFloat16.h"
 #include "vkQueryUtil.hpp"
-#include "vkRefUtil.hpp"
-#include <cstring>
 #include <vector>
 #include <limits>
 #include <cstdint>
 #include <fenv.h>
-#include <cstdint>
 #include <cmath>
 
 namespace vkt::SpirVAssembly
@@ -2675,8 +2671,14 @@ void TestCasesBuilder::build(vector<OperationTestCase> &testCases, TypeTestResul
             OperationId operation = binaryCase.operationId;
             testCases.emplace_back("denorm_op_var_flush_to_zero", B_DENORM_FLUSH, operation, V_DENORM, V_ONE,
                                    binaryCase.opVarResult, fp16NoStorage);
-            testCases.emplace_back("denorm_op_denorm_flush_to_zero", B_DENORM_FLUSH, operation, V_DENORM, V_DENORM,
-                                   binaryCase.opDenormResult, fp16NoStorage);
+            if (operation != OID_SSTEP)
+            {
+                // With flush to zero, the result of calculating a denorm value should be zero, so both arguments of the
+                // SmoothStep function are identical and the result of the function is undefined in those cases. This
+                // cannot be fixed by using two different denorm values due to the DenormFlushToZero execution mode.
+                testCases.emplace_back("denorm_op_denorm_flush_to_zero", B_DENORM_FLUSH, operation, V_DENORM, V_DENORM,
+                                       binaryCase.opDenormResult, fp16NoStorage);
+            }
             testCases.emplace_back("denorm_op_inf_flush_to_zero", B_DENORM_FLUSH | B_ZIN_PRESERVE, operation, V_DENORM,
                                    V_INF, binaryCase.opInfResult, fp16NoStorage);
             testCases.emplace_back("denorm_op_nan_flush_to_zero", B_DENORM_FLUSH | B_ZIN_PRESERVE, operation, V_DENORM,
@@ -3533,7 +3535,7 @@ bool checkFloats(const vector<Resource> &, const vector<AllocationSp> &outputAll
     for (uint32_t outputNdx = 0; outputNdx < outputAllocs.size(); ++outputNdx)
     {
         vector<uint8_t> expectedBytes;
-        expectedOutputs[outputNdx].getBytes(expectedBytes);
+        expectedOutputs[outputNdx].buffer->getBytes(expectedBytes);
 
         if (!compareBytes<TYPE, FLOAT_TYPE>(expectedBytes, outputAllocs[outputNdx], log))
             return false;
@@ -3564,9 +3566,9 @@ bool checkMixedFloats(const vector<Resource> &, const vector<AllocationSp> &outp
 
     while (resultIndex--)
     {
-        expectedOutputs[resultIndex].getBytes(expectedBytes);
+        expectedOutputs[resultIndex].buffer->getBytes(expectedBytes);
         BufferDataType type =
-            static_cast<BufferDataType>(reinterpret_cast<std::uintptr_t>(expectedOutputs[resultIndex].getUserData()));
+            static_cast<BufferDataType>(reinterpret_cast<std::uintptr_t>(expectedOutputs[resultIndex].userData));
         allResultsAreCorrect &= compareMap.at(type)(expectedBytes, outputAllocs[resultIndex], log);
     }
 
@@ -3640,7 +3642,7 @@ protected:
                                                string &executionMode) const;
 
     void setupFloatControlsProperties(VariableType inVariableType, VariableType outVariableType,
-                                      BehaviorFlags behaviorFlags,
+                                      BehaviorFlags behaviorFlags, OperationId operationId,
                                       vk::VkPhysicalDeviceFloatControlsProperties &props) const;
 
 protected:
@@ -3812,7 +3814,7 @@ void TestGroupBuilderBase::getBehaviorCapabilityAndExecutionMode(BehaviorFlags b
 }
 
 void TestGroupBuilderBase::setupFloatControlsProperties(VariableType inVariableType, VariableType outVariableType,
-                                                        BehaviorFlags behaviorFlags,
+                                                        BehaviorFlags behaviorFlags, OperationId operationId,
                                                         vk::VkPhysicalDeviceFloatControlsProperties &props) const
 {
     // rounding mode should obey the destination type
@@ -3820,6 +3822,11 @@ void TestGroupBuilderBase::setupFloatControlsProperties(VariableType inVariableT
     bool rtzRounding = (behaviorFlags & B_RTZ_ROUNDING) != 0;
     if (rteRounding || rtzRounding)
     {
+        // handle OID_ORTE_ROUND and OID_ORTZ_ROUND tests that set the execution
+        // mode to one rounding mode but then override it on a per-instruction level
+        rteRounding |= (operationId == OID_ORTE_ROUND);
+        rtzRounding |= (operationId == OID_ORTZ_ROUND);
+
         switch (outVariableType)
         {
         case FP16:
@@ -4450,7 +4457,8 @@ void ComputeTestGroupBuilder::fillShaderSpec(const OperationTestCaseInfo &testCa
 
     setupFloatControlsProperties(
         inVariableTypeForCaps, // usualy same as inFloatType - different only for UnpackHalf2x16
-        outVariableType, testCase.behaviorFlags, csSpec.requestedVulkanFeatures.floatControlsProperties);
+        outVariableType, testCase.behaviorFlags, testCase.operationId,
+        csSpec.requestedVulkanFeatures.floatControlsProperties);
 }
 
 void ComputeTestGroupBuilder::fillShaderSpec(const SettingsTestCaseInfo &testCaseInfo, ComputeShaderSpec &csSpec) const
@@ -4683,13 +4691,13 @@ void ComputeTestGroupBuilder::fillShaderSpec(const SettingsTestCaseInfo &testCas
     csSpec.extensions.push_back("VK_KHR_shader_float_controls");
 }
 
-void getGraphicsShaderCode(vk::SourceCollections &dst, InstanceContext context)
+void getGraphicsShaderCode(vk::SourceCollections &dst, InstanceContextPtr context)
 {
     // this function is used only by GraphicsTestGroupBuilder but it couldn't
     // be implemented as a method because of how addFunctionCaseWithPrograms
     // was implemented
 
-    SpirvVersion targetSpirvVersion = context.resources.spirvVersion;
+    SpirvVersion targetSpirvVersion = context->resources.spirvVersion;
     const uint32_t vulkanVersion    = dst.usedVulkanVersion;
 
     static const string vertexTemplate =
@@ -4872,9 +4880,9 @@ void getGraphicsShaderCode(vk::SourceCollections &dst, InstanceContext context)
         "OpReturn\n"
         "OpFunctionEnd\n";
 
-    dst.spirvAsmSources.add("vert", nullptr) << StringTemplate(vertexTemplate).specialize(context.testCodeFragments)
+    dst.spirvAsmSources.add("vert", nullptr) << StringTemplate(vertexTemplate).specialize(context->testCodeFragments)
                                              << SpirVAsmBuildOptions(vulkanVersion, targetSpirvVersion);
-    dst.spirvAsmSources.add("frag", nullptr) << StringTemplate(fragmentTemplate).specialize(context.testCodeFragments)
+    dst.spirvAsmSources.add("frag", nullptr) << StringTemplate(fragmentTemplate).specialize(context->testCodeFragments)
                                              << SpirVAsmBuildOptions(vulkanVersion, targetSpirvVersion);
 }
 
@@ -4897,7 +4905,7 @@ public:
     void createSettingsTests(TestCaseGroup *parentGroup) override;
 
 protected:
-    InstanceContext createInstanceContext(const OperationTestCaseInfo &testCaseInfo) const;
+    InstanceContextPtr createInstanceContext(const OperationTestCaseInfo &testCaseInfo) const;
 
 private:
     TestCasesBuilder m_testCaseBuilder;
@@ -4935,11 +4943,11 @@ void GraphicsTestGroupBuilder::createOperationTests(TestCaseGroup *parentGroup, 
         OperationTestCaseInfo testCaseInfo = {variableType, argumentsFromInput, VK_SHADER_STAGE_VERTEX_BIT,
                                               m_testCaseBuilder.getOperation(testCase.operationId), testCase};
 
-        InstanceContext ctxVertex = createInstanceContext(testCaseInfo);
-        string testName           = replace(testCase.baseName, "op", testCaseInfo.operation.name);
+        InstanceContextPtr ctxVertex = createInstanceContext(testCaseInfo);
+        string testName              = replace(testCase.baseName, "op", testCaseInfo.operation.name);
 
-        addFunctionCaseWithPrograms<InstanceContext>(group, testName + "_vert", getGraphicsShaderCode,
-                                                     runAndVerifyDefaultPipeline, ctxVertex);
+        addFunctionCaseWithPrograms<InstanceContextPtr>(group, testName + "_vert", defaultCheckSupport,
+                                                        getGraphicsShaderCode, runAndVerifyDefaultPipeline, ctxVertex);
     }
 
     // create test cases for fragment stage
@@ -4955,11 +4963,12 @@ void GraphicsTestGroupBuilder::createOperationTests(TestCaseGroup *parentGroup, 
         OperationTestCaseInfo testCaseInfo = {variableType, argumentsFromInput, VK_SHADER_STAGE_FRAGMENT_BIT,
                                               m_testCaseBuilder.getOperation(testCase.operationId), testCase};
 
-        InstanceContext ctxFragment = createInstanceContext(testCaseInfo);
-        string testName             = replace(testCase.baseName, "op", testCaseInfo.operation.name);
+        InstanceContextPtr ctxFragment = createInstanceContext(testCaseInfo);
+        string testName                = replace(testCase.baseName, "op", testCaseInfo.operation.name);
 
-        addFunctionCaseWithPrograms<InstanceContext>(group, testName + "_frag", getGraphicsShaderCode,
-                                                     runAndVerifyDefaultPipeline, ctxFragment);
+        addFunctionCaseWithPrograms<InstanceContextPtr>(group, testName + "_frag", defaultCheckSupport,
+                                                        getGraphicsShaderCode, runAndVerifyDefaultPipeline,
+                                                        ctxFragment);
     }
 }
 
@@ -4970,7 +4979,7 @@ void GraphicsTestGroupBuilder::createSettingsTests(TestCaseGroup *parentGroup)
     // WG decided that testing settings only for compute stage is sufficient
 }
 
-InstanceContext GraphicsTestGroupBuilder::createInstanceContext(const OperationTestCaseInfo &testCaseInfo) const
+InstanceContextPtr GraphicsTestGroupBuilder::createInstanceContext(const OperationTestCaseInfo &testCaseInfo) const
 {
     // LUT storing functions used to verify test results
     const VerifyIOFunc checkFloatsLUT[] = {checkFloats<Float16, deFloat16>, checkFloats<Float32, float>,
@@ -5344,7 +5353,7 @@ InstanceContext GraphicsTestGroupBuilder::createInstanceContext(const OperationT
     VulkanFeatures vulkanFeatures;
     setupFloatControlsProperties(
         inVariableTypeForCaps, // usualy same as inFloatType - different only for UnpackHalf2x16
-        outVariableType, testCase.behaviorFlags, vulkanFeatures.floatControlsProperties);
+        outVariableType, testCase.behaviorFlags, testCase.operationId, vulkanFeatures.floatControlsProperties);
     vulkanFeatures.coreFeatures.fragmentStoresAndAtomics = true;
     vulkanFeatures.coreFeatures.shaderFloat64            = float64FeatureRequired;
     vulkanFeatures.coreFeatures.shaderInt64              = int64FeatureRequired;
@@ -5356,9 +5365,11 @@ InstanceContext GraphicsTestGroupBuilder::createInstanceContext(const OperationT
     if (requiresFloatControlsExtension)
         extensions.push_back("VK_KHR_shader_float_controls");
 
-    InstanceContext ctx(defaultColors, defaultColors, specializations, noSpecConstants, noPushConstants, resources,
-                        noInterfaces, extensions, vulkanFeatures, testedStage);
+    InstanceContextUniquePtr ctxPtr(new InstanceContext(defaultColors, defaultColors, specializations, noSpecConstants,
+                                                        noPushConstants, resources, noInterfaces, extensions,
+                                                        vulkanFeatures, testedStage));
 
+    auto &ctx = *ctxPtr;
     ctx.moduleMap["vert"].emplace_back("main", VK_SHADER_STAGE_VERTEX_BIT);
     ctx.moduleMap["frag"].emplace_back("main", VK_SHADER_STAGE_FRAGMENT_BIT);
 
@@ -5366,7 +5377,7 @@ InstanceContext GraphicsTestGroupBuilder::createInstanceContext(const OperationT
     ctx.failResult     = QP_TEST_RESULT_FAIL;
     ctx.failMessageTemplate = "Output doesn't match with expected";
 
-    return ctx;
+    return ctxPtr;
 }
 
 } // namespace

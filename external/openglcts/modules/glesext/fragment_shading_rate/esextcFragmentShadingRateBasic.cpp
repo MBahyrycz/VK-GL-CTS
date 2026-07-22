@@ -53,6 +53,10 @@ FragmentShadingRateBasic::FragmentShadingRateBasic(Context &context, const ExtPa
                                                    const char *description)
     : TestCaseBase(context, extParams, name, description)
     , m_program(nullptr)
+    , m_to_id(0)
+    , m_fbo_id(0)
+    , m_vao_id(0)
+    , m_vbo_id(0)
 {
 }
 
@@ -74,13 +78,28 @@ void FragmentShadingRateBasic::deinit(void)
     // Retrieve GLES entry points.
     const glw::Functions &gl = m_context.getRenderContext().getFunctions();
 
+    // Reset fragment shading rate state
+    if (m_is_fragment_shading_rate_supported)
+    {
+        gl.shadingRateEXT(GL_SHADING_RATE_1X1_PIXELS_EXT);
+        gl.shadingRateCombinerOpsEXT(GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT,
+                                     GL_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_EXT);
+    }
+
+    if (m_is_fragment_shading_rate_attachment_supported)
+    {
+        gl.framebufferShadingRateEXT(GL_FRAMEBUFFER, GL_SHADING_RATE_ATTACHMENT_EXT, 0, 0, 1, 1, 1);
+    }
+
     // Reset GLES state
     gl.bindTexture(GL_TEXTURE_2D, 0);
     gl.bindBuffer(GL_ARRAY_BUFFER, 0);
+    gl.bindVertexArray(0);
     gl.bindFramebuffer(GL_FRAMEBUFFER, 0);
 
     gl.deleteTextures(1, &m_to_id);
     gl.deleteFramebuffers(1, &m_fbo_id);
+    gl.deleteVertexArrays(1, &m_vao_id);
     gl.deleteBuffers(1, &m_vbo_id);
 
     delete m_program;
@@ -180,6 +199,12 @@ void FragmentShadingRateBasic::setupTest(void)
     {
         randomVertices[i] = deRandom_getFloat(&rnd) * 2.0f - 1.0f;
     }
+
+    gl.genVertexArrays(1, &m_vao_id);
+    GLU_EXPECT_NO_ERROR(gl.getError(), "Error generate vertex arrays");
+
+    gl.bindVertexArray(m_vao_id);
+    GLU_EXPECT_NO_ERROR(gl.getError(), "Error bind vertex array");
 
     gl.genBuffers(1, &m_vbo_id);
     GLU_EXPECT_NO_ERROR(gl.getError(), "Error generate buffer objects");

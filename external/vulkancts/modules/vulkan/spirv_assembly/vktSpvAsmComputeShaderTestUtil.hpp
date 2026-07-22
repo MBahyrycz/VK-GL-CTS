@@ -209,7 +209,7 @@ public:
             {
                 // BUFFERTYPE_ATOMIC_RET for arithmetic operations must be verified manually by matching return values to inputs
                 std::vector<uint8_t> inputBytes;
-                inputs[0].getBytes(inputBytes);
+                inputs[0].buffer->getBytes(inputBytes);
 
                 const uint32_t *inputValues   = reinterpret_cast<uint32_t *>(&inputBytes.front());
                 const size_t inputValuesCount = inputBytes.size() / sizeof(uint32_t);
@@ -229,7 +229,7 @@ public:
             {
                 std::vector<uint8_t> expectedBytes;
 
-                expectedOutputs[i].getBytes(expectedBytes);
+                expectedOutputs[i].buffer->getBytes(expectedBytes);
 
                 if (deMemCmp(&expectedBytes.front(), values, expectedBytes.size()))
                 {
@@ -699,6 +699,7 @@ struct ComputeShaderSpec
     // The last numArrayInputs inputs are considered an array binding.
     size_t numArrayInputs;
     bool uses64BitIndexing;
+    bool usesLongVector;
 
     ComputeShaderSpec(void)
         : entryPoint("main")
@@ -714,6 +715,7 @@ struct ComputeShaderSpec
         , graphicsFeaturesRequired(false)
         , numArrayInputs(0)
         , uses64BitIndexing(false)
+        , usesLongVector(false)
     {
     }
 };

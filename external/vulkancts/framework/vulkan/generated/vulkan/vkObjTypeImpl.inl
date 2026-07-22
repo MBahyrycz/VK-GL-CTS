@@ -27,6 +27,7 @@ template<> inline VkObjectType	getObjectType<VkDisplayModeKHR>					(void) { retu
 template<> inline VkObjectType	getObjectType<VkEvent>							(void) { return VK_OBJECT_TYPE_EVENT;							}
 template<> inline VkObjectType	getObjectType<VkFence>							(void) { return VK_OBJECT_TYPE_FENCE;							}
 template<> inline VkObjectType	getObjectType<VkFramebuffer>					(void) { return VK_OBJECT_TYPE_FRAMEBUFFER;						}
+template<> inline VkObjectType	getObjectType<VkGpaSessionAMD>					(void) { return VK_OBJECT_TYPE_GPA_SESSION_AMD;					}
 template<> inline VkObjectType	getObjectType<VkImage>							(void) { return VK_OBJECT_TYPE_IMAGE;							}
 template<> inline VkObjectType	getObjectType<VkImageView>						(void) { return VK_OBJECT_TYPE_IMAGE_VIEW;						}
 template<> inline VkObjectType	getObjectType<VkIndirectCommandsLayoutEXT>		(void) { return VK_OBJECT_TYPE_INDIRECT_COMMANDS_LAYOUT_EXT;	}
@@ -34,6 +35,7 @@ template<> inline VkObjectType	getObjectType<VkIndirectCommandsLayoutNV>		(void)
 template<> inline VkObjectType	getObjectType<VkIndirectExecutionSetEXT>		(void) { return VK_OBJECT_TYPE_INDIRECT_EXECUTION_SET_EXT;		}
 template<> inline VkObjectType	getObjectType<VkInstance>						(void) { return VK_OBJECT_TYPE_INSTANCE;						}
 template<> inline VkObjectType	getObjectType<VkMicromapEXT>					(void) { return VK_OBJECT_TYPE_MICROMAP_EXT;					}
+template<> inline VkObjectType	getObjectType<VkPerformanceConfigurationINTEL>	(void) { return VK_OBJECT_TYPE_PERFORMANCE_CONFIGURATION_INTEL;	}
 template<> inline VkObjectType	getObjectType<VkPhysicalDevice>					(void) { return VK_OBJECT_TYPE_PHYSICAL_DEVICE;					}
 template<> inline VkObjectType	getObjectType<VkPipeline>						(void) { return VK_OBJECT_TYPE_PIPELINE;						}
 template<> inline VkObjectType	getObjectType<VkPipelineBinaryKHR>				(void) { return VK_OBJECT_TYPE_PIPELINE_BINARY_KHR;				}

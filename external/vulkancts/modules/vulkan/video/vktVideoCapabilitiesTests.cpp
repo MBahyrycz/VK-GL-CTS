@@ -76,6 +76,7 @@ enum TestType
 struct CaseDef
 {
     TestType testType;
+    bool extendedFlags;
 };
 
 #define VALIDATE_FIELD_EQUAL(A, B, X)           \
@@ -362,11 +363,23 @@ tcu::TestStatus VideoFormatPropertiesQueryTestInstance<ProfileOperation>::iterat
         &videoProfile,                                 //  const VkVideoProfileInfoKHR* pProfiles;
     };
 
-    const VkPhysicalDeviceVideoFormatInfoKHR videoFormatInfo = {
+    VkPhysicalDeviceVideoFormatInfoKHR videoFormatInfo = {
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VIDEO_FORMAT_INFO_KHR, //  VkStructureType sType;
         const_cast<VkVideoProfileListInfoKHR *>(&videoProfiles), //  const void* pNext;
         m_imageUsageFlags,                                       //  VkImageUsageFlags imageUsage;
     };
+#ifndef CTS_USES_VULKANSC
+    const VkImageUsageFlags2CreateInfoKHR usageFlags2Info = {
+        VK_STRUCTURE_TYPE_IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR,
+        const_cast<void *>(videoFormatInfo.pNext),
+        (VkImageUsageFlags2KHR)m_imageUsageFlags,
+    };
+    if (m_caseDef.extendedFlags)
+    {
+        videoFormatInfo.pNext      = &usageFlags2Info;
+        videoFormatInfo.imageUsage = 0u;
+    }
+#endif
     const VkImageUsageFlags imageUsageFlagsDPB =
         VK_IMAGE_USAGE_VIDEO_DECODE_DPB_BIT_KHR | VK_IMAGE_USAGE_VIDEO_ENCODE_DPB_BIT_KHR;
     const bool imageUsageDPB = (videoFormatInfo.imageUsage & imageUsageFlagsDPB) != 0;
@@ -389,7 +402,7 @@ tcu::TestStatus VideoFormatPropertiesQueryTestInstance<ProfileOperation>::iterat
     }
 
     {
-        const VkVideoFormatPropertiesKHR videoFormatPropertiesKHR = {
+        VkVideoFormatPropertiesKHR videoFormatPropertiesKHR = {
             VK_STRUCTURE_TYPE_VIDEO_FORMAT_PROPERTIES_KHR, //  VkStructureType sType;
             nullptr,                                       //  void* pNext;
             VK_FORMAT_MAX_ENUM,                            //  VkFormat format;
@@ -402,6 +415,35 @@ tcu::TestStatus VideoFormatPropertiesQueryTestInstance<ProfileOperation>::iterat
         };
         std::vector<VkVideoFormatPropertiesKHR> videoFormatProperties(videoFormatPropertiesCount,
                                                                       videoFormatPropertiesKHR);
+
+#ifndef CTS_USES_VULKANSC
+        std::vector<VkImageCreateFlags2CreateInfoKHR> createFlags2Infos(videoFormatPropertiesCount);
+        std::vector<VkImageUsageFlags2CreateInfoKHR> usageFlags2Infos(videoFormatPropertiesCount);
+        if (m_caseDef.extendedFlags)
+        {
+            for (uint32_t i = 0; i < videoFormatPropertiesCount; ++i)
+            {
+                VkImageCreateFlags2CreateInfoKHR createFlags2Info = {
+                    VK_STRUCTURE_TYPE_IMAGE_CREATE_FLAGS_2_CREATE_INFO_KHR,
+                    nullptr,
+                    (VkImageCreateFlags2KHR)videoFormatProperties[i].imageCreateFlags,
+                };
+                VkImageUsageFlags2CreateInfoKHR usageFlags2Info2 = {
+                    VK_STRUCTURE_TYPE_IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR,
+                    nullptr,
+                    (VkImageUsageFlags2KHR)videoFormatProperties[i].imageUsageFlags,
+                };
+                createFlags2Infos.push_back(createFlags2Info);
+                usageFlags2Infos.push_back(usageFlags2Info2);
+
+                usageFlags2Infos[i].pNext      = &createFlags2Infos[i];
+                videoFormatProperties[i].pNext = &usageFlags2Infos[i];
+
+                videoFormatProperties[i].imageCreateFlags = 0u;
+                videoFormatProperties[i].imageUsageFlags  = 0u;
+            }
+        }
+#endif
 
         const VkResult result = vk.getPhysicalDeviceVideoFormatPropertiesKHR(
             physicalDevice, &videoFormatInfo, &videoFormatPropertiesCount, videoFormatProperties.data());
@@ -660,9 +702,11 @@ tcu::TestStatus VideoCapabilitiesQueryH264DecodeTestInstance::iterate(void)
         STD_VIDEO_H264_PROFILE_IDC_BASELINE,                  //  StdVideoH264ProfileIdc stdProfileIdc;
         VK_VIDEO_DECODE_H264_PICTURE_LAYOUT_PROGRESSIVE_KHR,  //  VkVideoDecodeH264PictureLayoutFlagsKHR pictureLayout;
     };
+    const de::MovePtr<VkVideoDecodeUsageInfoKHR> videoDecodeUsageInfo =
+        getDecodeUsageInfo((void *)&videoProfileOperation, VK_VIDEO_DECODE_USAGE_DEFAULT_KHR);
     const VkVideoProfileInfoKHR videoProfile = {
         VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, //  VkStructureType sType;
-        (void *)&videoProfileOperation,           //  void* pNext;
+        (void *)videoDecodeUsageInfo.get(),       //  void* pNext;
         videoCodecOperation,                      //  VkVideoCodecOperationFlagBitsKHR videoCodecOperation;
         VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR,  //  VkVideoChromaSubsamplingFlagsKHR chromaSubsampling;
         VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR,   //  VkVideoComponentBitDepthFlagsKHR lumaBitDepth;
@@ -887,9 +931,11 @@ tcu::TestStatus VideoCapabilitiesQueryH265DecodeTestInstance::iterate(void)
         nullptr,                                              //  const void* pNext;
         STD_VIDEO_H265_PROFILE_IDC_MAIN,                      //  StdVideoH265ProfileIdc stdProfileIdc;
     };
+    const de::MovePtr<VkVideoDecodeUsageInfoKHR> videoDecodeUsageInfo =
+        getDecodeUsageInfo((void *)&videoProfileOperation, VK_VIDEO_DECODE_USAGE_DEFAULT_KHR);
     const VkVideoProfileInfoKHR videoProfile = {
         VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, //  VkStructureType sType;
-        (void *)&videoProfileOperation,           //  void* pNext;
+        (void *)videoDecodeUsageInfo.get(),       //  void* pNext;
         videoCodecOperation,                      //  VkVideoCodecOperationFlagBitsKHR videoCodecOperation;
         VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR,  //  VkVideoChromaSubsamplingFlagsKHR chromaSubsampling;
         VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR,   //  VkVideoComponentBitDepthFlagsKHR lumaBitDepth;
@@ -972,15 +1018,17 @@ tcu::TestStatus VideoCapabilitiesQueryAV1DecodeTestInstance::iterate(void)
     const InstanceInterface &vk                                = m_context.getInstanceInterface();
     const VkPhysicalDevice physicalDevice                      = m_context.getPhysicalDevice();
     const VkVideoCodecOperationFlagBitsKHR videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
-    VkVideoDecodeAV1ProfileInfoKHR videoProfileOperation       = {
+    const VkVideoDecodeAV1ProfileInfoKHR videoProfileOperation = {
         VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR, //  VkStructureType sType;
         nullptr,                                             //  const void* pNext;
         STD_VIDEO_AV1_PROFILE_MAIN,                          //  StdVideoAV1ProfileIdc stdProfileIdc;
         false,                                               // VkBool filmGrainSupport
     };
-    VkVideoProfileInfoKHR videoProfile = {
+    const de::MovePtr<VkVideoDecodeUsageInfoKHR> videoDecodeUsageInfo =
+        getDecodeUsageInfo((void *)&videoProfileOperation, VK_VIDEO_DECODE_USAGE_DEFAULT_KHR);
+    const VkVideoProfileInfoKHR videoProfile = {
         VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, //  VkStructureType sType;
-        (void *)&videoProfileOperation,           //  void* pNext;
+        (void *)videoDecodeUsageInfo.get(),       //  void* pNext;
         videoCodecOperation,                      //  VkVideoCodecOperationFlagBitsKHR videoCodecOperation;
         VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR,  //  VkVideoChromaSubsamplingFlagsKHR chromaSubsampling;
         VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR,   //  VkVideoComponentBitDepthFlagsKHR lumaBitDepth;
@@ -1063,14 +1111,16 @@ tcu::TestStatus VideoCapabilitiesQueryVP9DecodeTestInstance::iterate(void)
     const InstanceInterface &vk                                = m_context.getInstanceInterface();
     const VkPhysicalDevice physicalDevice                      = m_context.getPhysicalDevice();
     const VkVideoCodecOperationFlagBitsKHR videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR;
-    VkVideoDecodeVP9ProfileInfoKHR videoProfileOperation       = {
+    const VkVideoDecodeVP9ProfileInfoKHR videoProfileOperation = {
         VK_STRUCTURE_TYPE_VIDEO_DECODE_VP9_PROFILE_INFO_KHR, //  VkStructureType sType;
         nullptr,                                             //  const void* pNext;
-        STD_VIDEO_VP9_PROFILE_0,                             //  StdVideoAV1ProfileIdc stdProfileIdc;
+        STD_VIDEO_VP9_PROFILE_0,                             //  StdVideoVP9ProfileIdc stdProfileIdc;
     };
-    VkVideoProfileInfoKHR videoProfile = {
+    const de::MovePtr<VkVideoDecodeUsageInfoKHR> videoDecodeUsageInfo =
+        getDecodeUsageInfo((void *)&videoProfileOperation, VK_VIDEO_DECODE_USAGE_DEFAULT_KHR);
+    const VkVideoProfileInfoKHR videoProfile = {
         VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, //  VkStructureType sType;
-        (void *)&videoProfileOperation,           //  void* pNext;
+        (void *)videoDecodeUsageInfo.get(),       //  void* pNext;
         videoCodecOperation,                      //  VkVideoCodecOperationFlagBitsKHR videoCodecOperation;
         VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR,  //  VkVideoChromaSubsamplingFlagsKHR chromaSubsampling;
         VK_VIDEO_COMPONENT_BIT_DEPTH_8_BIT_KHR,   //  VkVideoComponentBitDepthFlagsKHR lumaBitDepth;
@@ -1741,6 +1791,11 @@ VideoCapabilitiesQueryTestCase::~VideoCapabilitiesQueryTestCase(void)
 
 void VideoCapabilitiesQueryTestCase::checkSupport(Context &context) const
 {
+#ifndef DE_BUILD_VIDEO
+    DE_UNREF(context);
+    TCU_THROW(NotSupportedError, "Video tests are disabled via DEQP_DISABLE_VK_VIDEO_TESTS");
+#endif
+
     context.requireDeviceFunctionality("VK_KHR_video_queue");
 
     if (context.isDeviceFunctionalitySupported("VK_KHR_video_maintenance2"))
@@ -1814,6 +1869,9 @@ void VideoCapabilitiesQueryTestCase::checkSupport(Context &context) const
     default:
         TCU_THROW(NotSupportedError, "Unknown TestType");
     }
+
+    if (m_caseDef.extendedFlags)
+        context.requireDeviceFunctionality(VK_KHR_EXTENDED_FLAGS_EXTENSION_NAME);
 }
 
 TestInstance *VideoCapabilitiesQueryTestCase::createInstance(Context &context) const
@@ -2104,7 +2162,8 @@ MaybeFormatProperties getVideoFormatProperties(const InstanceInterface &vki, VkP
         return ret;
     }
 
-    DE_ASSERT(numVideoFormatInfos > 0);
+    if (numVideoFormatInfos == 0)
+        TCU_THROW(TestError, "vkGetPhysicalDeviceVideoFormatPropertiesKHR returned VK_SUCCESS with zero formats");
 
     ret.items.resize(numVideoFormatInfos);
     for (auto &item : ret.items)
@@ -2118,6 +2177,12 @@ MaybeFormatProperties getVideoFormatProperties(const InstanceInterface &vki, VkP
 
 void checkSupport(Context &context, de::SharedPtr<TestParams> params)
 {
+#ifndef DE_BUILD_VIDEO
+    DE_UNREF(context);
+    DE_UNREF(params);
+    TCU_THROW(NotSupportedError, "Video tests are disabled via DEQP_DISABLE_VK_VIDEO_TESTS");
+#endif
+
     context.requireDeviceFunctionality("VK_KHR_video_queue");
 
     switch (params->coreProfile.GetCodecType())
@@ -2280,14 +2345,21 @@ tcu::TestCaseGroup *createVideoCapabilitiesTests(tcu::TestContext &testCtx)
     // Video encoding and decoding capability query tests
     de::MovePtr<tcu::TestCaseGroup> group(new tcu::TestCaseGroup(testCtx, "capabilities"));
 
-    for (int testTypeNdx = 0; testTypeNdx < TEST_TYPE_LAST; ++testTypeNdx)
+    for (const bool extendedFlags : {false, true})
     {
-        const TestType testType = static_cast<TestType>(testTypeNdx);
-        const CaseDef caseDef   = {
-            testType, //  TestType testType;
-        };
+        const char *flagsGroupName = extendedFlags ? "extended_flags" : "none";
+        de::MovePtr<tcu::TestCaseGroup> flagsGroup(new tcu::TestCaseGroup(testCtx, flagsGroupName));
+        for (int testTypeNdx = 0; testTypeNdx < TEST_TYPE_LAST; ++testTypeNdx)
+        {
+            const TestType testType = static_cast<TestType>(testTypeNdx);
+            const CaseDef caseDef   = {
+                testType,     //  TestType testType;
+                extendedFlags //  bool extendedFlags;
+            };
 
-        group->addChild(new VideoCapabilitiesQueryTestCase(testCtx, getTestName(testType), caseDef));
+            flagsGroup->addChild(new VideoCapabilitiesQueryTestCase(testCtx, getTestName(testType), caseDef));
+        }
+        group->addChild(flagsGroup.release());
     }
 
     return group.release();

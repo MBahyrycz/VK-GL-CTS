@@ -26,7 +26,6 @@
 #include "tcuCommandLine.hpp"
 #include "vktVideoTestUtils.hpp"
 #include "vktVideoEncodeTests.hpp"
-#include "vktVideoTestUtils.hpp"
 #include "vktTestCase.hpp"
 
 #ifdef DE_BUILD_VIDEO
@@ -43,7 +42,6 @@
 #include "tcuTexture.hpp"
 #include "tcuVector.hpp"
 #include "tcuPixelFormat.hpp"
-#include "tcuTextureUtil.hpp"
 #include "tcuImageCompare.hpp"
 
 #include "vkDefs.hpp"
@@ -63,10 +61,6 @@
 #include <string>
 #include <algorithm>
 #include <cmath>
-
-#ifndef VK_MAX_NUM_IMAGE_PLANES_KHR
-#define VK_MAX_NUM_IMAGE_PLANES_KHR 4
-#endif
 
 namespace vkt
 {
@@ -174,105 +168,6 @@ enum TestCodec
 
     TEST_CODEC_LAST
 };
-
-const char *getTestName(const TestType testType)
-{
-    switch (testType)
-    {
-    case TEST_TYPE_H264_ENCODE_I:
-    case TEST_TYPE_H265_ENCODE_I:
-        return "i";
-    case TEST_TYPE_H264_ENCODE_RC_VBR:
-    case TEST_TYPE_H265_ENCODE_RC_VBR:
-        return "rc_vbr";
-    case TEST_TYPE_H264_ENCODE_RC_CBR:
-    case TEST_TYPE_H265_ENCODE_RC_CBR:
-        return "rc_cbr";
-    case TEST_TYPE_H264_ENCODE_RC_DISABLE:
-    case TEST_TYPE_H265_ENCODE_RC_DISABLE:
-        return "rc_disable";
-    case TEST_TYPE_H264_ENCODE_QUALITY_LEVEL:
-    case TEST_TYPE_H265_ENCODE_QUALITY_LEVEL:
-        return "quality_level";
-    case TEST_TYPE_H264_ENCODE_QM_DELTA_RC_VBR:
-    case TEST_TYPE_H265_ENCODE_QM_DELTA_RC_VBR:
-        return "quantization_map_delta_rc_vbr";
-    case TEST_TYPE_H264_ENCODE_QM_DELTA_RC_CBR:
-    case TEST_TYPE_H265_ENCODE_QM_DELTA_RC_CBR:
-        return "quantization_map_delta_rc_cbr";
-    case TEST_TYPE_H264_ENCODE_QM_DELTA_RC_DISABLE:
-    case TEST_TYPE_H265_ENCODE_QM_DELTA_RC_DISABLE:
-        return "quantization_map_delta_rc_disable";
-    case TEST_TYPE_H264_ENCODE_QM_DELTA:
-    case TEST_TYPE_H265_ENCODE_QM_DELTA:
-        return "quantization_map_delta";
-    case TEST_TYPE_H264_ENCODE_QM_EMPHASIS_CBR:
-    case TEST_TYPE_H265_ENCODE_QM_EMPHASIS_CBR:
-        return "quantization_map_emphasis_cbr";
-    case TEST_TYPE_H264_ENCODE_QM_EMPHASIS_VBR:
-    case TEST_TYPE_H265_ENCODE_QM_EMPHASIS_VBR:
-        return "quantization_map_emphasis_vbr";
-    case TEST_TYPE_H264_ENCODE_USAGE:
-    case TEST_TYPE_H265_ENCODE_USAGE:
-        return "usage";
-    case TEST_TYPE_H264_ENCODE_I_P:
-    case TEST_TYPE_H265_ENCODE_I_P:
-        return "i_p";
-    case TEST_TYPE_H264_ENCODE_I_P_NOT_MATCHING_ORDER:
-    case TEST_TYPE_H265_ENCODE_I_P_NOT_MATCHING_ORDER:
-        return "i_p_not_matching_order";
-    case TEST_TYPE_H264_I_P_B_13:
-    case TEST_TYPE_H265_I_P_B_13:
-        return "i_p_b_13";
-    case TEST_TYPE_H264_ENCODE_RESOLUTION_CHANGE_DPB:
-    case TEST_TYPE_H265_ENCODE_RESOLUTION_CHANGE_DPB:
-        return "resolution_change_dpb";
-    case TEST_TYPE_H264_ENCODE_QUERY_RESULT_WITH_STATUS:
-    case TEST_TYPE_H265_ENCODE_QUERY_RESULT_WITH_STATUS:
-        return "query_with_status";
-    case TEST_TYPE_H264_ENCODE_INLINE_QUERY:
-    case TEST_TYPE_H265_ENCODE_INLINE_QUERY:
-        return "inline_query";
-    case TEST_TYPE_H264_ENCODE_RESOURCES_WITHOUT_PROFILES:
-    case TEST_TYPE_H265_ENCODE_RESOURCES_WITHOUT_PROFILES:
-        return "resources_without_profiles";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_PICTURE_PARTITION:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_PICTURE_PARTITION:
-        return "intra_refresh_picture_partition";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED:
-        return "intra_refresh_any_block_based";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ROW_BASED:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ROW_BASED:
-        return "intra_refresh_row_based";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_COLUMN_BASED:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_COLUMN_BASED:
-        return "intra_refresh_column_based";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_EMPTY_REGION:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_EMPTY_REGION:
-        return "intra_refresh_any_block_based_empty_region";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ROW_BASED_EMPTY_REGION:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ROW_BASED_EMPTY_REGION:
-        return "intra_refresh_row_based_empty_region";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_COLUMN_BASED_EMPTY_REGION:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_COLUMN_BASED_EMPTY_REGION:
-        return "intra_refresh_column_based_empty_region";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_PICTURE_PARTITION_MIDWAY:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_PICTURE_PARTITION_MIDWAY:
-        return "intra_refresh_picture_partition_midway";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_MIDWAY:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_MIDWAY:
-        return "intra_refresh_any_block_based_midway";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ROW_BASED_MIDWAY:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ROW_BASED_MIDWAY:
-        return "intra_refresh_row_based_midway";
-    case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_COLUMN_BASED_MIDWAY:
-    case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_COLUMN_BASED_MIDWAY:
-        return "intra_refresh_column_based_midway";
-    default:
-        TCU_THROW(InternalError, "Unknown TestType");
-    }
-}
 
 enum TestCodec getTestCodec(const TestType testType)
 {
@@ -697,7 +592,7 @@ struct EncodeTestParam
       {1, 2, 3, 4},
       {1, 2, 3, 4},
       {1, 2, 3, 4}},
-     /* curSlot */ {0, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1, 5},
+     /* curSlot */ {0, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5},
      /* frameReferences */
      {refs<std::vector<uint8_t>>({}, {}), refs<std::vector<uint8_t>>({0}, {}),
       refs<std::vector<uint8_t>>({0, 1}, {1, 0}), refs<std::vector<uint8_t>>({0, 1}, {1, 0}),
@@ -1015,7 +910,7 @@ struct EncodeTestParam
       {1, 2, 3, 4},
       {1, 2, 3, 4},
       {1, 2, 3, 4}},
-     /* curSlot */ {0, 1, -1, -1, 2, -1, -1, 3, -1, -1, 4, -1, -1, 5},
+     /* curSlot */ {0, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5},
      /* frameReferences */
      {refs<std::vector<uint8_t>>({}, {}), refs<std::vector<uint8_t>>({0}, {}),
       refs<std::vector<uint8_t>>({0, 1}, {1, 0}), refs<std::vector<uint8_t>>({0, 1}, {1, 0}),
@@ -1115,6 +1010,139 @@ public:
     TestType getTestType() const
     {
         return m_params.type;
+    }
+
+    const std::string getTestName() const
+    {
+        std::string testName = "";
+        switch (getTestType())
+        {
+        case TEST_TYPE_H264_ENCODE_I:
+        case TEST_TYPE_H265_ENCODE_I:
+            testName += "i";
+            break;
+        case TEST_TYPE_H264_ENCODE_RC_VBR:
+        case TEST_TYPE_H265_ENCODE_RC_VBR:
+            testName += "rc_vbr";
+            break;
+        case TEST_TYPE_H264_ENCODE_RC_CBR:
+        case TEST_TYPE_H265_ENCODE_RC_CBR:
+            testName += "rc_cbr";
+            break;
+        case TEST_TYPE_H264_ENCODE_RC_DISABLE:
+        case TEST_TYPE_H265_ENCODE_RC_DISABLE:
+            testName += "rc_disable";
+            break;
+        case TEST_TYPE_H264_ENCODE_QUALITY_LEVEL:
+        case TEST_TYPE_H265_ENCODE_QUALITY_LEVEL:
+            testName += "quality_level";
+            break;
+        case TEST_TYPE_H264_ENCODE_QM_DELTA_RC_VBR:
+        case TEST_TYPE_H265_ENCODE_QM_DELTA_RC_VBR:
+            testName += "quantization_map_delta_rc_vbr";
+            break;
+        case TEST_TYPE_H264_ENCODE_QM_DELTA_RC_CBR:
+        case TEST_TYPE_H265_ENCODE_QM_DELTA_RC_CBR:
+            testName += "quantization_map_delta_rc_cbr";
+            break;
+        case TEST_TYPE_H264_ENCODE_QM_DELTA_RC_DISABLE:
+        case TEST_TYPE_H265_ENCODE_QM_DELTA_RC_DISABLE:
+            testName += "quantization_map_delta_rc_disable";
+            break;
+        case TEST_TYPE_H264_ENCODE_QM_DELTA:
+        case TEST_TYPE_H265_ENCODE_QM_DELTA:
+            testName += "quantization_map_delta";
+            break;
+        case TEST_TYPE_H264_ENCODE_QM_EMPHASIS_CBR:
+        case TEST_TYPE_H265_ENCODE_QM_EMPHASIS_CBR:
+            testName += "quantization_map_emphasis_cbr";
+            break;
+        case TEST_TYPE_H264_ENCODE_QM_EMPHASIS_VBR:
+        case TEST_TYPE_H265_ENCODE_QM_EMPHASIS_VBR:
+            testName += "quantization_map_emphasis_vbr";
+            break;
+        case TEST_TYPE_H264_ENCODE_USAGE:
+        case TEST_TYPE_H265_ENCODE_USAGE:
+            testName += "usage";
+            break;
+        case TEST_TYPE_H264_ENCODE_I_P:
+        case TEST_TYPE_H265_ENCODE_I_P:
+            testName += "i_p";
+            break;
+        case TEST_TYPE_H264_ENCODE_I_P_NOT_MATCHING_ORDER:
+        case TEST_TYPE_H265_ENCODE_I_P_NOT_MATCHING_ORDER:
+            testName += "i_p_not_matching_order";
+            break;
+        case TEST_TYPE_H264_I_P_B_13:
+        case TEST_TYPE_H265_I_P_B_13:
+            testName += "i_p_b_13";
+            break;
+        case TEST_TYPE_H264_ENCODE_RESOLUTION_CHANGE_DPB:
+        case TEST_TYPE_H265_ENCODE_RESOLUTION_CHANGE_DPB:
+            testName += "resolution_change_dpb";
+            break;
+        case TEST_TYPE_H264_ENCODE_QUERY_RESULT_WITH_STATUS:
+        case TEST_TYPE_H265_ENCODE_QUERY_RESULT_WITH_STATUS:
+            testName += "query_with_status";
+            break;
+        case TEST_TYPE_H264_ENCODE_INLINE_QUERY:
+        case TEST_TYPE_H265_ENCODE_INLINE_QUERY:
+            testName += "inline_query";
+            break;
+        case TEST_TYPE_H264_ENCODE_RESOURCES_WITHOUT_PROFILES:
+        case TEST_TYPE_H265_ENCODE_RESOURCES_WITHOUT_PROFILES:
+            testName += "resources_without_profiles";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_PICTURE_PARTITION:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_PICTURE_PARTITION:
+            testName += "intra_refresh_picture_partition";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED:
+            testName += "intra_refresh_any_block_based";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ROW_BASED:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ROW_BASED:
+            testName += "intra_refresh_row_based";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_COLUMN_BASED:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_COLUMN_BASED:
+            testName += "intra_refresh_column_based";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_EMPTY_REGION:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_EMPTY_REGION:
+            testName += "intra_refresh_any_block_based_empty_region";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ROW_BASED_EMPTY_REGION:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ROW_BASED_EMPTY_REGION:
+            testName += "intra_refresh_row_based_empty_region";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_COLUMN_BASED_EMPTY_REGION:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_COLUMN_BASED_EMPTY_REGION:
+            testName += "intra_refresh_column_based_empty_region";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_PICTURE_PARTITION_MIDWAY:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_PICTURE_PARTITION_MIDWAY:
+            testName += "intra_refresh_picture_partition_midway";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_MIDWAY:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ANY_BLOCK_BASED_MIDWAY:
+            testName += "intra_refresh_any_block_based_midway";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_ROW_BASED_MIDWAY:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_ROW_BASED_MIDWAY:
+            testName += "intra_refresh_row_based_midway";
+            break;
+        case TEST_TYPE_H264_ENCODE_INTRA_REFRESH_COLUMN_BASED_MIDWAY:
+        case TEST_TYPE_H265_ENCODE_INTRA_REFRESH_COLUMN_BASED_MIDWAY:
+            testName += "intra_refresh_column_based_midway";
+            break;
+        default:
+            TCU_THROW(InternalError, "Unknown TestType");
+        }
+        testName += std::string(isLayered() ? "_layered_src" : "_separated_src") +
+                    std::string(usesGeneralLayout() ? "_general_layout" : "_video_layout");
+        return testName;
     }
 
     bool isLayered() const
@@ -1368,6 +1396,9 @@ public:
                 flags |= VideoDevice::VIDEO_DEVICE_FLAG_REQUIRE_INTRA_REFRESH;
             }
 
+            if (usesGeneralLayout())
+                flags |= VideoDevice::VIDEO_DEVICE_FLAG_REQUIRE_UNIFIED_IMAGE_LAYOUTS;
+
             return flags;
         }
         default:
@@ -1407,6 +1438,7 @@ private:
     VkVideoCoreProfile m_profile;
 };
 
+#ifdef DE_BUILD_VIDEO
 struct bytestreamWriteWithStatus
 {
     uint32_t bitstreamOffset;
@@ -1542,8 +1574,8 @@ void fillBuffer(const DeviceInterface &vk, const VkDevice device, Allocation &bu
         flushSize                              //  VkDeviceSize size;
     };
 
-    T *hostPtr = static_cast<T *>(bufferAlloc.getHostPtr());
-    memcpy(hostPtr + dataOffset, data.data(), data.size() * sizeof(T));
+    uint8_t *bytePtr = static_cast<uint8_t *>(bufferAlloc.getHostPtr());
+    memcpy(bytePtr + dataOffset, data.data(), data.size() * sizeof(T));
 
     VK_CHECK(vk.flushMappedMemoryRanges(device, 1u, &memRange));
 }
@@ -1701,11 +1733,6 @@ VkVideoReferenceSlotInfoKHR makeVideoReferenceSlot(int32_t slotIndex,
 
     return videoReferenceSlotKHR;
 }
-
-// Vulkan video is not supported on android platform
-// all external libraries, helper functions and test instances has been excluded
-#ifdef DE_BUILD_VIDEO
-
 #endif // DE_BUILD_VIDEO
 
 class VideoEncodeTestInstance : public VideoBaseTestInstance
@@ -1915,6 +1942,7 @@ VideoEncodeTestInstance::~VideoEncodeTestInstance(void)
 {
 }
 
+#ifdef DE_BUILD_VIDEO
 Move<VkQueryPool> VideoEncodeTestInstance::createEncodeVideoQueries(const DeviceInterface &videoDeviceDriver,
                                                                     VkDevice device, uint32_t numQueries,
                                                                     const VkVideoProfileInfoKHR *pVideoProfile)
@@ -2127,7 +2155,7 @@ void VideoEncodeTestInstance::queryAndValidateCapabilities()
     m_H265QuantizationMapCapabilities = getVideoEncodeH265QuantizationMapCapabilities();
 
     // Get codec capabilities
-    const bool quantizationMapEnabled = m_useDeltaMap | m_useEmphasisMap;
+    const bool quantizationMapEnabled = m_useDeltaMap || m_useEmphasisMap;
     m_videoH264CapabilitiesExtension =
         getVideoCapabilitiesExtensionH264E(quantizationMapEnabled ? m_H264QuantizationMapCapabilities.get() : nullptr);
     m_videoH265CapabilitiesExtension =
@@ -2293,8 +2321,9 @@ void VideoEncodeTestInstance::setupQuantizationMapResources(void)
     if (!m_useDeltaMap && !m_useEmphasisMap)
         return;
 
-    VkFormat quantizationImageFormat      = VK_FORMAT_R8_SNORM;
+    VkFormat quantizationImageFormat      = VK_FORMAT_UNDEFINED;
     VkImageTiling quantizationImageTiling = VK_IMAGE_TILING_OPTIMAL;
+    VkImageCreateFlags imageCreateFlags   = 0;
 
     // Query quantization map capabilities
     uint32_t videoFormatPropertiesCount = 0u;
@@ -2347,6 +2376,7 @@ void VideoEncodeTestInstance::setupQuantizationMapResources(void)
     // Pick first available quantization map format and properties
     quantizationImageFormat    = videoFormatProperties[0].format;
     quantizationImageTiling    = videoFormatProperties[0].imageTiling;
+    imageCreateFlags           = videoFormatProperties[0].imageCreateFlags;
     m_quantizationMapTexelSize = quantizationMapProperties[0].quantizationMapTexelSize;
 
     DE_ASSERT(m_quantizationMapTexelSize.width > 0 && m_quantizationMapTexelSize.height > 0);
@@ -2360,18 +2390,19 @@ void VideoEncodeTestInstance::setupQuantizationMapResources(void)
         (m_useDeltaMap ? VK_IMAGE_USAGE_VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_BIT_KHR :
                          VK_IMAGE_USAGE_VIDEO_ENCODE_EMPHASIS_MAP_BIT_KHR) |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    const VkImageCreateInfo quantizationMapImageCreateInfo = makeImageCreateInfo(
-        quantizationImageFormat, m_quantizationMapExtent, 0, &m_encodeQueueFamilyIndex, quantizationMapImageUsage,
-        m_videoEncodeProfileList.get(), 1U, VK_IMAGE_LAYOUT_UNDEFINED, quantizationImageTiling);
+    const VkImageCreateInfo quantizationMapImageCreateInfo =
+        makeImageCreateInfo(quantizationImageFormat, m_quantizationMapExtent, imageCreateFlags,
+                            &m_encodeQueueFamilyIndex, quantizationMapImageUsage, m_videoEncodeProfileList.get(), 1U,
+                            VK_IMAGE_LAYOUT_UNDEFINED, quantizationImageTiling);
 
-    const vector<uint32_t> transaferQueueFamilyIndices(1u, m_transferQueueFamilyIndex);
+    const vector<uint32_t> transferQueueFamilyIndices(1u, m_transferQueueFamilyIndex);
 
     const VkBufferUsageFlags quantizationMapBufferUsageFlags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     const VkDeviceSize quantizationMapBufferSize =
         getBufferSize(quantizationImageFormat, m_quantizationMapExtent.width, m_quantizationMapExtent.height);
 
     const VkBufferCreateInfo quantizationMapBufferCreateInfo = makeBufferCreateInfo(
-        quantizationMapBufferSize, quantizationMapBufferUsageFlags, transaferQueueFamilyIndices, 0, nullptr);
+        quantizationMapBufferSize, quantizationMapBufferUsageFlags, transferQueueFamilyIndices, 0, nullptr);
 
     BufferWithMemory quantizationMapBuffer(*m_videoDeviceDriver, m_videoEncodeDevice, getAllocator(),
                                            quantizationMapBufferCreateInfo,
@@ -2380,7 +2411,7 @@ void VideoEncodeTestInstance::setupQuantizationMapResources(void)
     Allocation &quantizationMapBufferAlloc = quantizationMapBuffer.getAllocation();
     void *quantizationMapBufferHostPtr     = quantizationMapBufferAlloc.getHostPtr();
 
-    // Calculate QP values for each image sides, the type of values is based on the quantization map format and adnotated by the index
+    // Calculate QP values for each image sides, the type of values is based on the quantization map format and annotated by the index
     auto calculateMapValues = [this](auto idx, QuantizationMap mapType) -> auto
     {
         using T          = decltype(idx);
@@ -2793,7 +2824,9 @@ void VideoEncodeTestInstance::loadVideoFrames(void)
 
         if (m_dumpOutput & tcu::DUMP_ENC_YUV)
         {
-            std::string filename = "in_" + std::to_string(i) + ".yuv";
+            const std::string encodePrefix = util::getVideoCodecPathSegment(m_testDefinition->getCodecOperation());
+            const std::string filename =
+                util::getVideoDumpPath(false, m_testDefinition->getTestName(), encodePrefix, "yuv", i);
             vkt::ycbcr::YCbCrContent<uint8_t>::save(*in, filename);
         }
 
@@ -3264,12 +3297,9 @@ void VideoEncodeTestInstance::encodeFrame(uint16_t gopIdx, uint32_t nalIdx, VkBu
 
     VkVideoReferenceSlotInfoKHR *setupReferenceSlotPtr = nullptr;
 
-    int8_t curSlotIdx = m_testDefinition->curSlot(nalIdx);
-    if (!bType)
-    {
-        setupReferenceSlotPtr            = &m_dpbImageVideoReferenceSlots[curSlotIdx];
-        setupReferenceSlotPtr->slotIndex = curSlotIdx;
-    }
+    int8_t curSlotIdx                = m_testDefinition->curSlot(nalIdx);
+    setupReferenceSlotPtr            = &m_dpbImageVideoReferenceSlots[curSlotIdx];
+    setupReferenceSlotPtr->slotIndex = curSlotIdx;
 
     uint32_t srcPictureResourceIdx = (gopIdx * m_gopFrameCount) + m_testDefinition->frameIdx(nalIdx);
 
@@ -3370,21 +3400,17 @@ void VideoEncodeTestInstance::handleSwapOrderSubmission(Move<VkQueryPool> &encod
 tcu::TestStatus VideoEncodeTestInstance::verifyEncodedBitstream(const BufferWithMemory &encodeBuffer,
                                                                 VkDeviceSize encodeBufferSize)
 {
+    const string encodePrefix = util::getVideoCodecPathSegment(m_testDefinition->getCodecOperation());
     if (m_dumpOutput & tcu::DUMP_ENC_BITSTREAM)
     {
-        auto outputFileName = string("out_") + getTestName(m_testDefinition->getTestType());
-
-        if (m_testDefinition->getProfile()->IsH264())
-            outputFileName += ".h264";
-        else if (m_testDefinition->getProfile()->IsH265())
-            outputFileName += ".h265";
+        const string ext            = m_testDefinition->getProfile()->IsH264() ? "h264" : "h265";
+        const string outputFileName = util::getVideoDumpPath(true, m_testDefinition->getTestName(), encodePrefix, ext);
 
         saveBufferAsFile(encodeBuffer, encodeBufferSize, outputFileName);
     }
 
     // Vulkan video is not supported on android platform
     // all external libraries, helper functions and test instances has been excluded
-#ifdef DE_BUILD_VIDEO
     DeviceContext deviceContext(&m_context, &m_videoDevice, m_physicalDevice, m_videoEncodeDevice, m_decodeQueue,
                                 m_encodeQueue, m_transferQueue);
 
@@ -3411,7 +3437,8 @@ tcu::TestStatus VideoEncodeTestInstance::verifyEncodedBitstream(const BufferWith
     // Use the actual frame count processed rather than the pattern definition
     uint32_t actualFramesToCheck = m_gopCount * m_gopFrameCount;
 
-    auto basicDecoder = createBasicDecoder(&deviceContext, &decodeProfile, actualFramesToCheck, m_resolutionChange);
+    auto basicDecoder = createBasicDecoder(&deviceContext, &decodeProfile, actualFramesToCheck, m_resolutionChange,
+                                           m_testDefinition->usesGeneralLayout());
 
     Demuxer::Params demuxParams = {};
     demuxParams.data            = std::make_unique<BufferedReader>(
@@ -3454,7 +3481,8 @@ tcu::TestStatus VideoEncodeTestInstance::verifyEncodedBitstream(const BufferWith
 
         if (m_dumpOutput & tcu::DUMP_ENC_YUV)
         {
-            const string outputFileName = "out_" + std::to_string(NALIdx) + ".yuv";
+            const string outputFileName =
+                util::getVideoDumpPath(true, m_testDefinition->getTestName(), encodePrefix, "yuv", NALIdx);
             vkt::ycbcr::YCbCrContent<uint8_t>::save(*out, outputFileName);
         }
 
@@ -3495,7 +3523,7 @@ tcu::TestStatus VideoEncodeTestInstance::verifyEncodedBitstream(const BufferWith
 
             if ((m_useDeltaMap || m_useEmphasisMap) && NALIdx == 1)
             {
-                // When testing quantization map, the PSNR of the secont image is expected to be low
+                // When testing quantization map, the PSNR of the second image is expected to be low
                 break;
             }
             if (psnr > criticalPsnrThreshold)
@@ -3515,11 +3543,6 @@ tcu::TestStatus VideoEncodeTestInstance::verifyEncodedBitstream(const BufferWith
 
     const string passMessage = std::to_string(actualFramesToCheck) + " correctly encoded frames";
     return tcu::TestStatus::pass(passMessage);
-#else
-    DE_UNREF(encodeBuffer);
-    DE_UNREF(encodeBufferSize);
-    TCU_THROW(NotSupportedError, "Vulkan video is not supported on android platform");
-#endif
 }
 
 void VideoEncodeTestInstance::prepareEncodeBuffer(void)
@@ -3827,14 +3850,16 @@ uint32_t VideoEncodeTestInstance::calculateTotalFramesFromClipData(const std::ve
     size_t frameSize = width * height * 3 / 2; // Y: width*height, U/V: width*height/4 each
     DE_ASSERT(frameSize > 0);
     // Calculate the maximum number of complete frames in the clip
-    size_t maxFrames = static_cast<uint32_t>(clip.size() / frameSize);
+    size_t maxFrames = clip.size() / frameSize;
     DE_ASSERT(maxFrames <= UINT32_MAX);
 
     return static_cast<uint32_t>(maxFrames);
 }
+#endif // DE_BUILD_VIDEO
 
 tcu::TestStatus VideoEncodeTestInstance::iterate(void)
 {
+#ifdef DE_BUILD_VIDEO
     initializeTestParameters();
     setupDeviceAndQueues();
     queryAndValidateCapabilities();
@@ -3852,6 +3877,9 @@ tcu::TestStatus VideoEncodeTestInstance::iterate(void)
     if (m_swapOrder)
         handleSwapOrderSubmission(m_encodeQueryPool);
     return verifyEncodedBitstream(*m_encodeBuffer.get(), m_encodeBufferSize);
+#else
+    TCU_THROW(NotSupportedError, "Video tests are disabled via DEQP_DISABLE_VK_VIDEO_TESTS");
+#endif // DE_BUILD_VIDEO
 }
 
 class VideoEncodeTestCase : public TestCase
@@ -3880,9 +3908,9 @@ VideoEncodeTestCase::~VideoEncodeTestCase(void)
 
 void VideoEncodeTestCase::checkSupport(Context &context) const
 {
-    context.requireDeviceFunctionality("VK_KHR_video_queue");
+    VideoDevice::checkSupport(context, m_testDefinition->getCodecOperation());
+
     context.requireDeviceFunctionality("VK_KHR_synchronization2");
-    context.requireDeviceFunctionality("VK_KHR_video_encode_queue");
 
     switch (m_testDefinition->getTestType())
     {
@@ -3972,7 +4000,7 @@ void VideoEncodeTestCase::checkSupport(Context &context) const
         TCU_THROW(InternalError, "Unknown TestType");
     }
 
-    if (m_testDefinition->usesGeneralLayout() == VK_IMAGE_LAYOUT_GENERAL)
+    if (m_testDefinition->usesGeneralLayout())
     {
         context.requireDeviceFunctionality("VK_KHR_unified_image_layouts");
         if (!context.getUnifiedImageLayoutsFeatures().unifiedImageLayoutsVideo)
@@ -3984,13 +4012,7 @@ void VideoEncodeTestCase::checkSupport(Context &context) const
 
 TestInstance *VideoEncodeTestCase::createInstance(Context &context) const
 {
-#ifdef DE_BUILD_VIDEO
     return new VideoEncodeTestInstance(context, m_testDefinition.get());
-#else
-    // Vulkan video is not supported on android platform
-    DE_UNREF(context);
-    return nullptr;
-#endif
 }
 
 } // namespace
@@ -4010,9 +4032,8 @@ tcu::TestCaseGroup *createVideoEncodeTests(tcu::TestContext &testCtx)
             {
                 auto defn = TestDefinition::create(encodeTest, layeredSrc, generalLayout);
 
-                std::string testName = std::string(getTestName(defn->getTestType())) +
-                                       std::string(layeredSrc ? "_layered_src" : "_separated_src") +
-                                       std::string(generalLayout ? "_general_layout" : "_video_layout");
+                std::string testName = defn->getTestName();
+
                 auto testCodec = getTestCodec(defn->getTestType());
 
                 if (testCodec == TEST_CODEC_H264)

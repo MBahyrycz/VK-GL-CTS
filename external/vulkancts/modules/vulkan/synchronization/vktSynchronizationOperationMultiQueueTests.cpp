@@ -25,21 +25,18 @@
 #include "vktCustomInstancesDevices.hpp"
 #include "vkDefs.hpp"
 #include "vktTestCase.hpp"
-#include "vktTestCaseUtil.hpp"
 #include "vkRef.hpp"
 #include "vkRefUtil.hpp"
 #include "vkMemUtil.hpp"
 #include "vkBarrierUtil.hpp"
 #include "vkQueryUtil.hpp"
 #include "vkDeviceUtil.hpp"
-#include "vkTypeUtil.hpp"
 #include "vkPlatform.hpp"
 #include "vkCmdUtil.hpp"
 #include "vkSafetyCriticalUtil.hpp"
 #include "deRandom.hpp"
 #include "deUniquePtr.hpp"
 #include "deSharedPtr.hpp"
-#include "tcuTestLog.hpp"
 #include "vktSynchronizationUtil.hpp"
 #include "vktSynchronizationOperation.hpp"
 #include "vktSynchronizationOperationTestData.hpp"
@@ -47,13 +44,9 @@
 #include "vktTestGroupUtil.hpp"
 #include "tcuCommandLine.hpp"
 
-#include <set>
 #include <unordered_map>
 
-namespace vkt
-{
-
-namespace synchronization
+namespace vkt::synchronization
 {
 
 namespace
@@ -112,24 +105,11 @@ class MultiQueues
     };
 
     MultiQueues(Context &context, SynchronizationType type, bool timelineSemaphore, bool maintenance8)
-#ifdef CTS_USES_VULKANSC
-        : m_instance(createCustomInstanceFromContext(context))
-        ,
-#else
-        :
-#endif // CTS_USES_VULKANSC
-        m_queueCount(0)
+        : m_instance(context)
+        , m_queueCount(0)
     {
-#ifdef CTS_USES_VULKANSC
         const InstanceInterface &instanceDriver = m_instance.getDriver();
-        const VkPhysicalDevice physicalDevice =
-            chooseDevice(instanceDriver, m_instance, context.getTestContext().getCommandLine());
-        const VkInstance instance = m_instance;
-#else
-        const InstanceInterface &instanceDriver = context.getInstanceInterface();
-        const VkPhysicalDevice physicalDevice   = context.getPhysicalDevice();
-        const VkInstance instance               = context.getInstance();
-#endif // CTS_USES_VULKANSC
+        const VkPhysicalDevice physicalDevice   = m_instance.getPhysicalDevice();
         const std::vector<VkQueueFamilyProperties> queueFamilyProperties =
             getPhysicalDeviceQueueFamilyProperties(instanceDriver, physicalDevice);
 
@@ -180,44 +160,6 @@ class MultiQueues
                 deviceExtensions.push_back("VK_KHR_maintenance8");
 
             void *pNext = &createPhysicalFeature;
-#ifdef CTS_USES_VULKANSC
-            VkDeviceObjectReservationCreateInfo memReservationInfo =
-                context.getTestContext().getCommandLine().isSubProcess() ?
-                    context.getResourceInterface()->getStatMax() :
-                    resetDeviceObjectReservationCreateInfo();
-            memReservationInfo.pNext = pNext;
-            pNext                    = &memReservationInfo;
-
-            VkPhysicalDeviceVulkanSC10Features sc10Features = createDefaultSC10Features();
-            sc10Features.pNext                              = pNext;
-            pNext                                           = &sc10Features;
-
-            VkPipelineCacheCreateInfo pcCI;
-            std::vector<VkPipelinePoolSize> poolSizes;
-            if (context.getTestContext().getCommandLine().isSubProcess())
-            {
-                if (context.getResourceInterface()->getCacheDataSize() > 0)
-                {
-                    pcCI = {
-                        VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, // VkStructureType sType;
-                        nullptr,                                      // const void* pNext;
-                        VK_PIPELINE_CACHE_CREATE_READ_ONLY_BIT |
-                            VK_PIPELINE_CACHE_CREATE_USE_APPLICATION_STORAGE_BIT, // VkPipelineCacheCreateFlags flags;
-                        context.getResourceInterface()->getCacheDataSize(),       // uintptr_t initialDataSize;
-                        context.getResourceInterface()->getCacheData()            // const void* pInitialData;
-                    };
-                    memReservationInfo.pipelineCacheCreateInfoCount = 1;
-                    memReservationInfo.pPipelineCacheCreateInfos    = &pcCI;
-                }
-
-                poolSizes = context.getResourceInterface()->getPipelinePoolSizes();
-                if (!poolSizes.empty())
-                {
-                    memReservationInfo.pipelinePoolSizeCount = uint32_t(poolSizes.size());
-                    memReservationInfo.pPipelinePoolSizes    = poolSizes.data();
-                }
-            }
-#endif // CTS_USES_VULKANSC
 
             const VkDeviceCreateInfo deviceInfo = {
                 VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,           //VkStructureType sType;
@@ -232,27 +174,12 @@ class MultiQueues
                 nullptr //const VkPhysicalDeviceFeatures* pEnabledFeatures;
             };
 
-            m_logicalDevice = createCustomDevice(context.getTestContext().getCommandLine().isValidationEnabled(),
-                                                 context.getPlatformInterface(), instance, instanceDriver,
-                                                 physicalDevice, &deviceInfo);
-#ifndef CTS_USES_VULKANSC
-            m_deviceDriver = de::MovePtr<DeviceDriver>(new DeviceDriver(context.getPlatformInterface(), instance,
-                                                                        *m_logicalDevice, context.getUsedApiVersion(),
-                                                                        context.getTestContext().getCommandLine()));
-#else
-            m_deviceDriver = de::MovePtr<DeviceDriverSC, DeinitDeviceDeleter>(
-                new DeviceDriverSC(context.getPlatformInterface(), instance, *m_logicalDevice,
-                                                 context.getTestContext().getCommandLine(), context.getResourceInterface(),
-                                                 context.getDeviceVulkanSC10Properties(), context.getDeviceProperties(),
-                                                 context.getUsedApiVersion()),
-                vk::DeinitDeviceDeleter(context.getResourceInterface().get(), *m_logicalDevice));
-#endif // CTS_USES_VULKANSC
-            m_allocator = MovePtr<Allocator>(new SimpleAllocator(
-                *m_deviceDriver, *m_logicalDevice, getPhysicalDeviceMemoryProperties(instanceDriver, physicalDevice)));
+            m_logicalDevice = m_instance.createCustomDevice(physicalDevice, &deviceInfo);
 
             for (std::map<uint32_t, QueueData>::iterator it = m_queues.begin(); it != m_queues.end(); ++it)
                 for (int queueNdx = 0; queueNdx < static_cast<int>(it->second.queue.size()); ++queueNdx)
-                    m_deviceDriver->getDeviceQueue(*m_logicalDevice, it->first, queueNdx, &it->second.queue[queueNdx]);
+                    m_logicalDevice.getDriver().getDeviceQueue(*m_logicalDevice, it->first, queueNdx,
+                                                               &it->second.queue[queueNdx]);
         }
     }
 
@@ -267,9 +194,7 @@ class MultiQueues
     }
 
 public:
-    ~MultiQueues()
-    {
-    }
+    ~MultiQueues() = default;
 
     std::vector<QueuePair> getQueuesPairs(const VkQueueFlags flagsWrite, const VkQueueFlags flagsRead,
                                           bool requireDifferent) const
@@ -309,15 +234,12 @@ public:
                         if (write->second.queue[writeNdx] != read->second.queue[readNdx] &&
                             (!requireDifferent || write->first != read->first))
                         {
-                            queuesPairs.push_back(QueuePair(write->first, read->first, write->second.queue[writeNdx],
-                                                            read->second.queue[readNdx]));
+                            queuesPairs.emplace_back(write->first, read->first, write->second.queue[writeNdx],
+                                                     read->second.queue[readNdx]);
                             writeNdx = readNdx = std::max(writeSize, readSize); //exit from the loops
                         }
                     }
             }
-
-        if (queuesPairs.empty())
-            TCU_THROW(NotSupportedError, "Queue not found");
 
         return queuesPairs;
     }
@@ -372,12 +294,12 @@ public:
 
     const DeviceInterface &getDeviceInterface(void) const
     {
-        return *m_deviceDriver;
+        return m_logicalDevice.getDriver();
     }
 
     Allocator &getAllocator(void)
     {
-        return *m_allocator;
+        return m_logicalDevice.getAllocator();
     }
 
     static SharedPtr<MultiQueues> getInstance(Context &context, SynchronizationType type, bool timelineSemaphore,
@@ -396,16 +318,8 @@ public:
     }
 
 private:
-#ifdef CTS_USES_VULKANSC
-    CustomInstance m_instance;
-#endif // CTS_USES_VULKANSC
-    Move<VkDevice> m_logicalDevice;
-#ifndef CTS_USES_VULKANSC
-    de::MovePtr<vk::DeviceDriver> m_deviceDriver;
-#else
-    de::MovePtr<DeviceDriverSC, DeinitDeviceDeleter> m_deviceDriver;
-#endif // CTS_USES_VULKANSC
-    MovePtr<Allocator> m_allocator;
+    InstanceWrapper m_instance;
+    DeviceWrapper m_logicalDevice;
     std::map<uint32_t, QueueData> m_queues;
     uint32_t m_queueCount;
 
@@ -1268,6 +1182,16 @@ public:
                       SYNC_PRIMITIVE_BINARY_SEMAPHORE);          // Not *required* but we'll restrict cases to this.
             DE_ASSERT(sharingMode == VK_SHARING_MODE_EXCLUSIVE); // These cases are about QFOT.
         }
+
+        if (m_syncPrimitive == SYNC_PRIMITIVE_TIMELINE_SEMAPHORE)
+        {
+            for (auto copyOp : s_copyOps)
+            {
+                if (isResourceSupported(copyOp, m_resourceDesc))
+                    m_copyOpVec.push_back(
+                        SharedPtr<OperationSupport>(makeOperationSupport(copyOp, m_resourceDesc).release()));
+            }
+        }
     }
 
     void initPrograms(SourceCollections &programCollection) const override
@@ -1277,11 +1201,8 @@ public:
 
         if (m_syncPrimitive == SYNC_PRIMITIVE_TIMELINE_SEMAPHORE)
         {
-            for (uint32_t copyOpNdx = 0; copyOpNdx < DE_LENGTH_OF_ARRAY(s_copyOps); copyOpNdx++)
-            {
-                if (isResourceSupported(s_copyOps[copyOpNdx], m_resourceDesc))
-                    makeOperationSupport(s_copyOps[copyOpNdx], m_resourceDesc)->initPrograms(programCollection);
-            }
+            for (auto &copyOp : m_copyOpVec)
+                copyOp->initPrograms(programCollection);
         }
     }
 
@@ -1310,14 +1231,19 @@ public:
 
         const InstanceInterface &instance     = context.getInstanceInterface();
         const VkPhysicalDevice physicalDevice = context.getPhysicalDevice();
-        const std::vector<VkQueueFamilyProperties> queueFamilyProperties =
-            getPhysicalDeviceQueueFamilyProperties(instance, physicalDevice);
+        const auto queueFamilyProperties      = getPhysicalDeviceQueueFamilyProperties(instance, physicalDevice);
+
         if (m_sharingMode == VK_SHARING_MODE_CONCURRENT && queueFamilyProperties.size() < 2)
             TCU_THROW(NotSupportedError, "Concurrent requires more than 1 queue family");
 
-        if (m_syncPrimitive == SYNC_PRIMITIVE_TIMELINE_SEMAPHORE &&
-            !context.getTimelineSemaphoreFeatures().timelineSemaphore)
-            TCU_THROW(NotSupportedError, "Timeline semaphore not supported");
+        if (m_syncPrimitive == SYNC_PRIMITIVE_TIMELINE_SEMAPHORE)
+        {
+            if (!context.getTimelineSemaphoreFeatures().timelineSemaphore)
+                TCU_THROW(NotSupportedError, "Timeline semaphore not supported");
+
+            for (auto &copyOp : m_copyOpVec)
+                copyOp->checkSupport(context);
+        }
 
         if (m_resourceDesc.type == RESOURCE_TYPE_IMAGE)
         {
@@ -1330,6 +1256,9 @@ public:
 
         if (m_maintenance9)
             context.requireDeviceFunctionality("VK_KHR_maintenance9");
+
+        m_writeOp->checkSupport(context);
+        m_readOp->checkSupport(context);
     }
 
     TestInstance *createInstance(Context &context) const override
@@ -1356,6 +1285,7 @@ protected:
     const ResourceDescription m_resourceDesc;
     const SharedPtr<OperationSupport> m_writeOp;
     const SharedPtr<OperationSupport> m_readOp;
+    std::vector<de::SharedPtr<OperationSupport>> m_copyOpVec;
     const SyncPrimitive m_syncPrimitive;
     const VkSharingMode m_sharingMode;
     const bool m_maintenance9;
@@ -1414,6 +1344,11 @@ public:
 
         if (m_maintenance9)
             context.requireDeviceFunctionality("VK_KHR_maintenance9");
+
+        m_writeOp->checkSupport(context);
+        m_readOp->checkSupport(context);
+        m_extraReadOp->checkSupport(context);
+        m_extraWriteOp->checkSupport(context);
     }
 
     TestInstance *createInstance(Context &context) const
@@ -1655,5 +1590,4 @@ tcu::TestCaseGroup *createSynchronizedOperationMultiQueueTests(tcu::TestContext 
     return createTestGroup(testCtx, "multi_queue", createTests, data, cleanupGroup);
 }
 
-} // namespace synchronization
-} // namespace vkt
+} // namespace vkt::synchronization

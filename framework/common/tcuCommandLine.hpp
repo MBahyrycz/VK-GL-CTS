@@ -45,7 +45,10 @@ enum RunMode
     RUNMODE_DUMP_XML_CASELIST,  //! Test program dumps the list of contained test cases in XML format.
     RUNMODE_DUMP_TEXT_CASELIST, //! Test program dumps the list of contained test cases in plain-text format.
     RUNMODE_DUMP_STDOUT_CASELIST, //! Test program dumps the list of contained test cases in plain-text format into stdout.
+    RUNMODE_DUMP_TEXT_TRIE,       //! Test program dumps the list of contained test cases in trie format to a text file.
+    RUNMODE_DUMP_STDOUT_TRIE,     //! Test program dumps the list of contained test cases in trie format to stdout.
     RUNMODE_VERIFY_AMBER_COHERENCY, //! Test program verifies that amber tests have coherent capability requirements
+    RUNMODE_GEN_MUSTPASS,           //! Test program generates per-config mustpass files from a spec.
 
     RUNMODE_LAST
 };
@@ -148,6 +151,7 @@ private:
 
     CaseTreeNode *m_caseTree;
     de::MovePtr<const CasePaths> m_casePaths;
+    de::MovePtr<const CasePaths> m_excludePaths;
     std::vector<int> m_caseFraction;
     de::MovePtr<const CasePaths> m_caseFractionMandatoryTests;
     tcu::TestRunnerType m_runnerType;
@@ -188,11 +192,20 @@ public:
     //! Get caselist dump target file pattern (--deqp-caselist-export-file)
     const char *getCaseListExportFile(void) const;
 
+    //! Get path to the mustpass generation spec file (--deqp-mustpass-spec)
+    const char *getMustpassSpec(void) const;
+
     //! Get default window visibility (--deqp-visibility)
     WindowVisibility getVisibility(void) const;
 
     //! Get watchdog enable status (--deqp-watchdog)
     bool isWatchDogEnabled(void) const;
+
+    //! Get watchdog total test case time limit in seconds (--deqp-watchdog-total-time-limit)
+    int getWatchDogTotalTime(void) const;
+
+    //! Get watchdog per iteration time limit in seconds time limit in seconds (--deqp-watchdog-interval-time-limit)
+    int getWatchDogIntervalTime(void) const;
 
     //! Get crash handling enable status (--deqp-crashhandler)
     bool isCrashHandlingEnabled(void) const;
@@ -375,8 +388,8 @@ public:
     //! File that provides a default set of application parameters
     const char *getAppParamsInputFilePath(void) const;
 
-    //! Perform tests for devices implementing compute-only functionality
-    bool isComputeOnly(void) const;
+    //! Allows you to use vendor-specific configuration
+    bool isVendorSpecific() const;
 
     /*--------------------------------------------------------------------*//*!
      * \brief Creates case list filter

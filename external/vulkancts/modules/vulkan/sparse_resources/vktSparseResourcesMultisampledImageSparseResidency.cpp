@@ -243,6 +243,7 @@ void MultisampledImageSparseResidencyCase::checkSupport(Context &context) const
 
     const VkPhysicalDeviceProperties physicalDeviceProperties = getPhysicalDeviceProperties(vki, physicalDevice);
     const VkPhysicalDeviceSparseProperties sparseProperties   = physicalDeviceProperties.sparseProperties;
+    const VkPhysicalDeviceFeatures physicalDeviceFeatures     = getPhysicalDeviceFeatures(vki, physicalDevice);
 
     if (!sparseProperties.residencyNonResidentStrict)
         TCU_THROW(NotSupportedError, "Operations on non resident part of sparse image are not supported");
@@ -263,6 +264,9 @@ void MultisampledImageSparseResidencyCase::checkSupport(Context &context) const
 
     if (m_params.sampleCount != VK_SAMPLE_COUNT_1_BIT)
         context.requireDeviceCoreFeature(DEVICE_CORE_FEATURE_SHADER_STORAGE_IMAGE_MULTISAMPLE);
+
+    if (!physicalDeviceFeatures.shaderResourceResidency)
+        TCU_THROW(NotSupportedError, "SparseResidency Capability Not Supported");
 }
 
 void MultisampledImageSparseResidencyCase::initPrograms(vk::SourceCollections &programCollection) const
@@ -316,8 +320,6 @@ MultisampledImageSparseResidencyInstance::MultisampledImageSparseResidencyInstan
 
 tcu::TestStatus MultisampledImageSparseResidencyInstance::iterate(void)
 {
-    const InstanceInterface &instance = m_context.getInstanceInterface();
-
     {
         // Create logical device supporting both sparse and compute queues
         QueueRequirementsVec queueRequirements;
@@ -329,6 +331,7 @@ tcu::TestStatus MultisampledImageSparseResidencyInstance::iterate(void)
 
     std::vector<DeviceMemorySp> deviceMemUniquePtrVec;
 
+    const InstanceInterface &instance               = getInstanceInterface();
     const DeviceInterface &deviceInterface          = getDeviceInterface();
     const Queue &sparseQueue                        = getQueue(VK_QUEUE_SPARSE_BINDING_BIT, 0);
     const Queue &computeQueue                       = getQueue(VK_QUEUE_COMPUTE_BIT, 0);

@@ -158,6 +158,9 @@ DevCaps::DevCaps(const std::string &id_, const ContextManager *mgr, tcu::TestCon
     , m_hasInheritedExtensions(false) // don't add all extensions that are available on the device
     , m_testContext(testContext)
     , m_allocatorParams(tcu::Nothing)
+    , m_callCheckSupport(true)
+    , m_shouldRecreateDeviceOnTestEnter(false)
+    , m_shouldRemoveDeviceOnTestExit(false)
     , id(id_)
 {
     reset();
@@ -172,6 +175,9 @@ DevCaps::DevCaps(const DevCaps &caps)
     , m_hasInheritedExtensions(caps.m_hasInheritedExtensions)
     , m_testContext(caps.m_testContext)
     , m_allocatorParams(caps.m_allocatorParams)
+    , m_callCheckSupport(true)
+    , m_shouldRecreateDeviceOnTestEnter(false)
+    , m_shouldRemoveDeviceOnTestExit(false)
     , id(caps.id)
 {
     m_features.resize(caps.m_features.size());
@@ -190,6 +196,9 @@ DevCaps::DevCaps(DevCaps &&caps) noexcept
     , m_hasInheritedExtensions(caps.m_hasInheritedExtensions)
     , m_testContext(caps.m_testContext)
     , m_allocatorParams(caps.m_allocatorParams)
+    , m_callCheckSupport(true)
+    , m_shouldRecreateDeviceOnTestEnter(false)
+    , m_shouldRemoveDeviceOnTestExit(false)
     , id(caps.id)
 {
 }
@@ -293,10 +302,116 @@ void DevCaps::reset()
     m_features.clear();
     setOwnExtensions();
 
-    const VkQueueFlags requiredFlags = m_contextManager->getCommandLine().isComputeOnly() ?
-                                           VkQueueFlags(VK_QUEUE_COMPUTE_BIT) :
-                                           (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+    const auto &vki            = m_contextManager->getInstanceInterface();
+    const auto physDev         = m_contextManager->getPhysicalDevice();
+    VkQueueFlags requiredFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    try
+    {
+        findQueueFamilyIndexWithCaps(vki, physDev, requiredFlags);
+    }
+    catch (const tcu::NotSupportedError &)
+    {
+        requiredFlags = VK_QUEUE_COMPUTE_BIT;
+    }
     resetQueues({{requiredFlags, 0, 1u, 1.0f}});
+}
+
+void DevCaps::resetQueuesForMultiQueueRunner(QueueCapabilities caps)
+{
+    const auto &vki    = m_contextManager->getInstanceInterface();
+    const auto physDev = m_contextManager->getPhysicalDevice();
+
+    if (caps == COMPUTE_QUEUE)
+    {
+        bool hasUniversal        = false;
+        bool hasDedicatedCompute = false;
+
+        try
+        {
+            findQueueFamilyIndexWithCaps(vki, physDev, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+            hasUniversal = true;
+            try
+            {
+                findQueueFamilyIndexWithCaps(vki, physDev, VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT);
+                hasDedicatedCompute = true;
+            }
+            catch (const tcu::NotSupportedError &)
+            {
+            }
+        }
+        catch (const tcu::NotSupportedError &)
+        {
+        }
+
+        if (hasUniversal && hasDedicatedCompute)
+        {
+            QueueCreateInfo infos[]{
+                {VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0, 1u, 1.0f},
+                {VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT, 1u, 1.0f},
+            };
+            resetQueues(infos);
+        }
+        else if (hasUniversal)
+        {
+            resetQueues({{VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0, 1u, 1.0f}});
+        }
+        else
+        {
+            resetQueues({{VK_QUEUE_COMPUTE_BIT, 0, 1u, 1.0f}});
+        }
+    }
+    else if (caps == TRANSFER_QUEUE)
+    {
+        bool hasUniversal         = false;
+        bool hasDedicatedCompute  = false;
+        bool hasDedicatedTransfer = false;
+
+        try
+        {
+            findQueueFamilyIndexWithCaps(vki, physDev, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+            hasUniversal = true;
+        }
+        catch (const tcu::NotSupportedError &)
+        {
+        }
+
+        if (hasUniversal)
+        {
+            try
+            {
+                findQueueFamilyIndexWithCaps(vki, physDev, VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT);
+                hasDedicatedCompute = true;
+            }
+            catch (const tcu::NotSupportedError &)
+            {
+            }
+        }
+
+        try
+        {
+            findQueueFamilyIndexWithCaps(vki, physDev, VK_QUEUE_TRANSFER_BIT,
+                                         VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+            hasDedicatedTransfer = true;
+        }
+        catch (const tcu::NotSupportedError &)
+        {
+        }
+
+        std::vector<QueueCreateInfo> infos;
+        if (hasUniversal)
+            infos.push_back({VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0, 1u, 1.0f});
+        else
+            infos.push_back({VK_QUEUE_COMPUTE_BIT, 0, 1u, 1.0f}); // compute-only hardware fallback
+        if (hasDedicatedCompute)
+            infos.push_back({VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT, 1u, 1.0f});
+        if (hasDedicatedTransfer)
+            infos.push_back({VK_QUEUE_TRANSFER_BIT, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 1u, 1.0f});
+        resetQueues(infos);
+    }
+    else if (caps == GRAPHICS_QUEUE)
+    {
+        resetQueues({{VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT, 0, 1u, 1.0f}});
+    }
 }
 
 template <class Stream>
@@ -372,24 +487,30 @@ void DevCaps::verifyFeature(vk::VkStructureType sType, bool checkRuntimeApiVersi
     // by the addition of the corresponding feature structure from the blob;
     // the reverse sequence is also detected
 
-    const std::map<uint32_t, vk::VkStructureType> apiToBlob{
-        {VK_API_VERSION_1_1, vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES},
-        {VK_API_VERSION_1_2, vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES},
+    const std::map<uint32_t, std::vector<vk::VkStructureType>> apiToBlob{
 #ifdef CTS_USES_VULKANSC
-        {VK_API_VERSION_1_0, vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_SC_1_0_FEATURES}
+        {VKSC_API_VERSION_1_0,
+         {vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+          vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+          vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_SC_1_0_FEATURES}}
 #else
-        {VK_API_VERSION_1_3, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES},
-        {VK_API_VERSION_1_4, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES},
+        {VK_API_VERSION_1_1, {vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES}},
+        {VK_API_VERSION_1_2, {vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES}},
+        {VK_API_VERSION_1_3, {vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES}},
+        {VK_API_VERSION_1_4, {vk::VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES}},
 #endif
     };
     const uint32_t newFeatureBlobVersion = vk::DeviceFeatures::getBlobFeatureVersion(sType);
     const bool newFeatureIsBlob          = newFeatureBlobVersion == 0u;
     auto blobToApi                       = [&](vk::VkStructureType blob) -> uint32_t
     {
-        for (const std::pair<const uint32_t, vk::VkStructureType> &item : apiToBlob)
+        for (const auto &items : apiToBlob)
         {
-            if (item.second == blob)
-                return item.first;
+            for (const auto &item : items.second)
+            {
+                if (item == blob)
+                    return items.first;
+            }
         }
         return 0u;
     };
@@ -481,7 +602,10 @@ void DevCaps::verifyFeature(vk::VkStructureType sType, bool checkRuntimeApiVersi
     {
         auto blob = apiToBlob.find(newFeatureBlobVersion);
         DE_ASSERT(apiToBlob.end() != blob);
-        traverseFeatures(m_features, blob->second, blobInFeatures);
+        for (const auto &item : blob->second)
+        {
+            traverseFeatures(m_features, item, blobInFeatures);
+        }
     }
 
     if (Status::Ok != status)
@@ -566,11 +690,12 @@ ContextManager::ContextManager(const PlatformInterface &vkPlatform, const tcu::C
 
 void ContextManager::keepMaxCustomDeviceCount()
 {
-    auto isDef = [](const Item &item) { return item.first->isDefaultContext(); };
-    auto def   = std::find_if(m_contexts.begin(), m_contexts.end(), isDef);
-    DE_ASSERT(m_contexts.end() != def);
     DE_ASSERT(m_maxCustomDevices > 0);
-    while (m_contexts.size() >= uint32_t(m_maxCustomDevices + 1))
+    auto isDef        = [](const Item &item) { return item.first->isDefaultContext(); };
+    auto def          = std::find_if(m_contexts.begin(), m_contexts.end(), isDef);
+    const bool hasDef = m_contexts.end() != def;
+
+    while (m_contexts.size() >= uint32_t(m_maxCustomDevices + (hasDef ? 1 : 0)))
     {
         auto beg = m_contexts.begin();
         def      = std::find_if(beg, m_contexts.end(), isDef);
@@ -580,7 +705,7 @@ void ContextManager::keepMaxCustomDeviceCount()
 }
 
 InstCaps::InstCaps(const PlatformInterface &vkPlatform, const tcu::CommandLine &commandLine)
-    : InstCaps(vkPlatform, commandLine, InstCaps::DefInstId)
+    : InstCaps(vkPlatform, commandLine, InstCaps::DefInstId, nullptr, nullptr, false)
 {
 }
 
@@ -601,8 +726,49 @@ std::vector<std::string> InstCaps::getExtensions() const
     return exts;
 }
 
+bool InstCaps::dontCreateDefaultDevice(bool flag)
+{
+    const bool oldFlag        = m_dontCreateDefaultDevice;
+    m_dontCreateDefaultDevice = flag;
+    return oldFlag;
+}
+
+bool InstCaps::dontCreateDefaultDevice() const
+{
+    return m_dontCreateDefaultDevice;
+}
+
+bool InstCaps::shouldRemoveInstanceOnTestExit() const
+{
+    return m_shouldRemoveInstanceOnTestExit;
+}
+
+void InstCaps::shouldRemoveInstanceOnTestExit(bool should)
+{
+    m_shouldRemoveInstanceOnTestExit = should;
+}
+
+void InstCaps::setDestroyAllDevices(bool all, bool includeDefaultDevice)
+{
+    m_destroyAllDevices.first  = all;
+    m_destroyAllDevices.second = includeDefaultDevice;
+}
+
+std::pair<bool, bool> InstCaps::getDestroyAllDevices() const
+{
+    return m_destroyAllDevices;
+}
+
+vk::VkPhysicalDevice InstCaps::selectDevice(const InstanceInterface &vki, VkInstance instance,
+                                            const tcu::CommandLine &cmdLine, VkPhysicalDevice suggestedDevice) const
+{
+    const VkPhysicalDevice dev = m_testCase ? m_testCase->selectPhysicalDevice(vki, instance, cmdLine) : VK_NULL_HANDLE;
+    return (dev != VK_NULL_HANDLE) ? dev : suggestedDevice;
+}
+
 de::SharedPtr<ContextManager> ContextManager::findCustomManager(vkt::TestCase *testCase,
-                                                                de::SharedPtr<ContextManager> defaultContextManager)
+                                                                de::SharedPtr<ContextManager> defaultContextManager,
+                                                                const InstCaps *hintCaps)
 {
     const std::string instCapsId = testCase->getInstanceCapabilitiesId();
     if (instCapsId != InstCaps::DefInstId)
@@ -618,7 +784,7 @@ de::SharedPtr<ContextManager> ContextManager::findCustomManager(vkt::TestCase *t
         de::SharedPtr<ResourceInterface> resourceInterface = defaultContextManager->getResourceInterface();
         const int maxCustomDevices                         = defaultContextManager->getMaxCustomDevices();
 
-        InstCaps icaps(platformInterface, commandLine, instCapsId);
+        InstCaps icaps(platformInterface, commandLine, instCapsId, testCase, hintCaps);
         testCase->initInstanceCapabilities(icaps);
         de::SharedPtr<ContextManager> customContextManager =
             ContextManager::create(platformInterface, commandLine, resourceInterface, maxCustomDevices, icaps);
@@ -633,61 +799,122 @@ de::SharedPtr<ContextManager> ContextManager::findCustomManager(vkt::TestCase *t
     return defaultContextManager;
 }
 
-de::SharedPtr<Context> ContextManager::findContext(de::SharedPtr<const ContextManager> thiz, TestCase *testCase,
-                                                   de::SharedPtr<Context> &defaultContext,
-                                                   vk::BinaryCollection &programs)
+de::SharedPtr<Context> ContextManager::createDefaultDevice(de::SharedPtr<ContextManager> owner,
+                                                           vk::BinaryCollection &programs,
+                                                           tcu::TestContext &testContext, bool *alreadyExists)
+
 {
-    de::SharedPtr<Context> checkContext;
+    if (alreadyExists)
+    {
+        *alreadyExists = true;
+    }
+    auto isDef = [](const Item &item) { return item.first->isDefaultContext(); };
+    auto def   = std::find_if(owner->m_contexts.begin(), owner->m_contexts.end(), isDef);
+    if (owner->m_contexts.end() == def)
+    {
+        de::SharedPtr<DevCaps> caps(new DevCaps(DevCaps::DefDevId, this, testContext));
+        de::SharedPtr<DevCaps::RuntimeData> runtimeData(new DevCaps::RuntimeData(*caps));
+        de::SharedPtr<Context> ctx(new Context(testContext, m_platformInterface, programs, owner,
+                                               vk::Move<vk::VkDevice>(), caps->id, runtimeData,
+                                               &getDeviceExtensions()));
+        owner->m_contexts.emplace_back(std::make_pair(ctx, caps));
+        def = std::find_if(owner->m_contexts.begin(), owner->m_contexts.end(), isDef);
+        if (alreadyExists)
+        {
+            *alreadyExists = false;
+        }
+    }
+
+    DE_ASSERT(owner->m_contexts.end() != def);
+
+    return def->first;
+}
+
+de::SharedPtr<Context> ContextManager::findContext(
+    de::SharedPtr<ContextManager> self, TestCase *testCase, de::SharedPtr<Context> &outTestContext,
+    de::SharedPtr<ContextManager> defaultManager, vk::BinaryCollection &programs,
+    std::function<void(de::SharedPtr<Context>, bool)> onBeforeRunTestCase)
+{
+    bool alreadyExists = false;
+    de::SharedPtr<Context> fallbackContext;
 
     tcu::TestContext &testContext = testCase->getTestContext();
 
+    // Create or get context with default device for compatibility with existing code.
+    outTestContext = createDefaultDevice(defaultManager, programs, testContext, &alreadyExists);
+
+    auto initDeviceCapabilities = [&](DevCaps &caps) -> void
+    {
+        try
+        {
+            testCase->initDeviceCapabilities(caps);
+        }
+        catch (const tcu::Exception &)
+        {
+            fallbackContext = {};
+            throw;
+        }
+    };
+
     try
     {
-        // Create context with default device for compatibility with existing code.
-        // If any of the calls throws an exception, the context with the default
-        // device will be returned from this function.
-        {
-            auto isDef = [](const Item &item) { return item.first->isDefaultContext(); };
-            auto def   = std::find_if(m_contexts.begin(), m_contexts.end(), isDef);
-            if (m_contexts.end() == def)
-            {
-                de::SharedPtr<DevCaps> caps(new DevCaps(DevCaps::DefDevId, this, testContext));
-                de::SharedPtr<DevCaps::RuntimeData> runtimeData(new DevCaps::RuntimeData(*caps));
-                de::SharedPtr<Context> ctx(new Context(testContext, m_platformInterface, programs, thiz,
-                                                       vk::Move<vk::VkDevice>(), caps->id, runtimeData,
-                                                       &getDeviceExtensions()));
-                m_contexts.emplace_back(std::make_pair(ctx, caps));
-                def = std::find_if(m_contexts.begin(), m_contexts.end(), isDef);
-            }
-
-            DE_ASSERT(m_contexts.end() != def);
-
-            defaultContext = def->first;
-            checkContext   = def->first;
-        }
-
         // check if context with specified capabilities id already exists
         const auto searchedId = testCase->getRequiredCapabilitiesId();
-        for (Item &ctx : m_contexts)
+
+        // The default ContextManager will never want to destroy its devices,
+        // but any other ContextManager may want to, including destroying the
+        // default device, by calling InstCaps::setDestroyAllDevices().
+        const auto wantsDestroyDevices = getDestroyAllDevices();
+        if (wantsDestroyDevices.first)
         {
-            if (ctx.second->id == searchedId)
+            destroyAllDevices(wantsDestroyDevices.second);
+        }
+        else
+        {
+            for (Item &ctx : m_contexts)
             {
-                checkContext = ctx.first;
-                testCase->delayedInit();
-                testCase->checkSupport(*checkContext);
-                return checkContext;
+                if (ctx.second->id == searchedId)
+                {
+                    if (ctx.second->shouldRecreateDeviceOnTestEnter())
+                    {
+                        destroyDevice(ctx.second->id);
+                        break;
+                    }
+
+                    fallbackContext = ctx.first;
+                    outTestContext  = fallbackContext;
+                    onBeforeRunTestCase(fallbackContext, ctx.second->getCallCheckSupport());
+                    return fallbackContext;
+                }
             }
         }
 
-        testCase->delayedInit();
-        testCase->checkSupport(*checkContext);
+        if (dontCreateDefaultDevice() && (searchedId == DevCaps::DefDevId))
+        {
+            std::ostringstream os;
+            os << '\"' << this->id
+               << " declared not to create a default device "
+                  "but did not overwrite the TestCase::getRequiredCapabilitiesId() method.";
+            TCU_THROW(EnforceDefaultContext, os.str());
+        }
+
+        if (false == dontCreateDefaultDevice() || (searchedId == DevCaps::DefDevId))
+        {
+            outTestContext = createDefaultDevice(self, programs, testContext, &alreadyExists);
+            if (searchedId == DevCaps::DefDevId)
+            {
+                fallbackContext = outTestContext;
+                onBeforeRunTestCase(outTestContext, true);
+                return outTestContext;
+            }
+        }
 
         de::SharedPtr<DevCaps::RuntimeData> runtimeData(new DevCaps::RuntimeData);
         de::SharedPtr<DevCaps> caps(new DevCaps(searchedId, this, testContext));
 
         // Default implementation of TestCase::initDeviceCapabilities() throws
         // in order to enforce creation of DefaultDevice.
-        testCase->initDeviceCapabilities(*caps);
+        initDeviceCapabilities(*caps);
 
         // If we need to create new device with specified capabilities then
         // also we need to make sure that we dont exceed m_maxCustomDevices limit.
@@ -695,26 +922,25 @@ de::SharedPtr<Context> ContextManager::findContext(de::SharedPtr<const ContextMa
         {
             runtimeData->verify();
 
-            de::SharedPtr<Context> ctx(new Context(testContext, m_platformInterface, programs, thiz, dev, caps->id,
+            de::SharedPtr<Context> ctx(new Context(testContext, m_platformInterface, programs, self, dev, caps->id,
                                                    runtimeData, &caps->getPhysicalDeviceExtensions()));
+            fallbackContext = ctx;
+            outTestContext  = ctx;
             keepMaxCustomDeviceCount();
             m_contexts.emplace_back(std::make_pair(ctx, caps));
+            onBeforeRunTestCase(ctx, caps->getCallCheckSupport());
 
             return m_contexts.back().first;
         }
     }
-    catch (const tcu::EnforceDefaultContext &edc)
-    {
-        DE_UNREF(edc);
-        defaultContext = checkContext;
-    }
     catch (const tcu::Exception &)
     {
-        defaultContext = checkContext;
+        outTestContext = fallbackContext ? fallbackContext :
+                                           createDefaultDevice(defaultManager, programs, testContext, &alreadyExists);
         throw;
     }
 
-    return checkContext;
+    return fallbackContext;
 }
 
 DevCaps::RuntimeData_::RuntimeData_(const DevCaps &caps)
@@ -791,9 +1017,8 @@ Move<VkDevice> ContextManager::createDevice(const DevCaps &caps, DevCaps::Runtim
     const InstanceInterface &vki                           = getInstanceInterface();
     const VkPhysicalDevice physicalDevice                  = getPhysicalDevice();
     const VkInstance instance                              = getInstanceHandle();
-    const uint32_t universalQueueIndex                     = findQueueFamilyIndexWithCaps(
-        vki, physicalDevice,
-        cmdLine.isComputeOnly() ? VK_QUEUE_COMPUTE_BIT : VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
+    const uint32_t universalQueueIndex =
+        findQueueFamilyIndexWithCaps(vki, physicalDevice, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT);
 
     // queues block
     std::vector<float> queuePriorities;
@@ -906,6 +1131,12 @@ Move<VkDevice> ContextManager::createDevice(const DevCaps &caps, DevCaps::Runtim
 #else
 Move<VkDevice> ContextManager::createDevice(const DevCaps &caps, DevCaps::RuntimeData &data) const
 {
+    const PlatformInterface &vkp                           = getPlatformInterface();
+    de::SharedPtr<vk::ResourceInterface> resourceInterface = getResourceInterface();
+    const InstanceInterface &vki                           = getInstanceInterface();
+    const VkPhysicalDevice physicalDevice                  = getPhysicalDevice();
+    const VkInstance instance                              = getInstanceHandle();
+
     // queues block
     std::vector<float> queuePriorities;
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
@@ -938,10 +1169,127 @@ Move<VkDevice> ContextManager::createDevice(const DevCaps &caps, DevCaps::Runtim
 
     print(caps.m_testContext.getLog(), deviceParams);
 
-    return createCustomDevice(getCommandLine().isValidationEnabled(), getPlatformInterface(), getInstanceHandle(),
-                              getInstanceInterface(), getPhysicalDevice(), &deviceParams, nullptr);
+    return vk::createDevice(vkp, instance, vki, physicalDevice, &deviceParams);
 }
 #endif // CTS_USES_VULKANSC
+
+uint32_t ContextManager::destroyAllDevices(bool includeDefaultDevice)
+{
+    uint32_t destroyed = 0u;
+    for (auto it = m_contexts.begin(); it != m_contexts.end();)
+    {
+        if (DevCaps::DefDevId == it->second->id)
+        {
+            if (includeDefaultDevice)
+            {
+#ifdef CTS_USES_VULKANSC
+                getResourceInterface()->resetPipelineCache(it->first->getDevice(), true);
+#endif // CTS_USES_VULKANSC
+                it = m_contexts.erase(it);
+                destroyed += 1u;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        else
+        {
+#ifdef CTS_USES_VULKANSC
+            getResourceInterface()->resetPipelineCache(it->first->getDevice(), true);
+#endif // CTS_USES_VULKANSC
+            it = m_contexts.erase(it);
+            destroyed += 1u;
+        }
+    }
+    return destroyed;
+}
+
+bool ContextManager::destroyDevice(const std::string &deviceID)
+{
+    auto dev = std::find_if(m_contexts.begin(), m_contexts.end(),
+                            [&](Item const &item) { return deviceID == item.first->getDeviceID(); });
+    if (m_contexts.end() != dev)
+    {
+#ifdef CTS_USES_VULKANSC
+        getResourceInterface()->resetPipelineCache(dev->first->getDevice(), true);
+#endif // CTS_USES_VULKANSC
+        m_contexts.erase(dev);
+        return true;
+    }
+    return false;
+}
+
+std::pair<uint32_t, bool> ContextManager::getDeviceCount() const
+{
+    uint32_t deviceCount  = 0u;
+    bool hasDefaultDevice = false;
+    for (auto i = m_contexts.begin(); i != m_contexts.end(); ++i)
+    {
+        hasDefaultDevice = hasDefaultDevice || i->first->getDeviceID() == DevCaps::DefDevId;
+        deviceCount      = deviceCount + 1u;
+    }
+    return {deviceCount, hasDefaultDevice};
+}
+
+uint32_t ContextManager::removeDevicesThatShouldBeRemovedOnTestExit(de::SharedPtr<ContextManager> mgr)
+{
+    uint32_t removed  = 0u;
+    ContextManager *p = mgr ? mgr.get() : this;
+    for (auto i = p->m_contexts.begin(); i != p->m_contexts.end();)
+    {
+        if (i->second->shouldRemoveDeviceOnTestExit())
+        {
+#ifdef CTS_USES_VULKANSC
+            p->getResourceInterface()->resetPipelineCache(i->first->getDevice(), true);
+#endif // CTS_USES_VULKANSC
+            i       = p->m_contexts.erase(i);
+            removed = removed + 1u;
+        }
+        else
+        {
+            ++i;
+        }
+    }
+    return removed;
+}
+
+uint32_t ContextManager::removeInstancesThatShouldBeRemovedOnTestExit(ContextManager *)
+{
+    uint32_t removed = 0u;
+    for (auto i = m_customManagers.begin(); i != m_customManagers.end();)
+    {
+        if (i->get()->shouldBeRemovedOnTestExit())
+        {
+            i->get()->destroyAllDevices(true);
+            if (i->get()->getDeviceCount().first == 0u)
+            {
+                i       = m_customManagers.erase(i);
+                removed = removed + 1u;
+            }
+            else
+            {
+                ++i;
+            }
+        }
+        else
+        {
+            ++i;
+        }
+    }
+
+    return removed;
+}
+
+de::SharedPtr<Context> ContextManager::getContextForDevice(const std::string &deviceID) const
+{
+    for (Item const &ctx : m_contexts)
+    {
+        if (ctx.second->id == deviceID)
+            return ctx.first;
+    }
+    return {};
+}
 
 DevCaps::QueueInfo DevCaps::RuntimeData_::getQueue(const DeviceInterface &di, vk::VkDevice device, uint32_t queueIndex,
                                                    bool isDefaultContext) const

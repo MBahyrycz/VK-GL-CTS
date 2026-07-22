@@ -8,6 +8,7 @@ option(GLES_ALLOW_DIRECT_LINK "Allow direct linking to GLES libraries" OFF)
 option(DEQP_ANDROID_EXE "Build dEQP modules as executables rather than a library on Android" OFF)
 option(DEQP_ANDROID_EXE_LOGCAT "Enable logging of dEQP output to logcat when using Android executables" OFF)
 option(DEQP_LOG_NODE_SOURCE "Log source code file and line where nodes are being added" OFF)
+option(DEQP_DISABLE_VK_VIDEO_TESTS "Disable Vulkan video tests (build but report as disabled)" OFF)
 
 # Target selection:
 # SELECTED_BUILD_TARGETS is a CMake option that can be set to a list of targets
@@ -149,16 +150,12 @@ include_directories(external/amber)
 add_subdirectory(external/jsoncpp EXCLUDE_FROM_ALL)
 include_directories(external/jsoncpp/src/include)
 
+# pipeline cache utils
+add_subdirectory(external/vulkansc-pcutil EXCLUDE_FROM_ALL)
+
 # RenderDoc API
 include_directories(external/renderdoc/src)
 
-# Vulkan video support libraries
-if (DE_OS_IS_WIN32 OR DE_OS_IS_UNIX)
-   # Video parser and encoder library
-   add_subdirectory(external/vulkan-video-samples EXCLUDE_FROM_ALL)
-   # YUV Video generator library
-   add_subdirectory(external/video_generator EXCLUDE_FROM_ALL)
-endif()
 
 include_directories(${PNG_INCLUDE_PATH})
 
@@ -256,9 +253,31 @@ else ()
 	add_definitions(-DDEQP_SUPPORT_DRM=0)
 endif ()
 
+if (NOT DE_OS_IS_WIN32 AND NOT DE_OS_IS_UNIX)
+	message(STATUS "Unsupported OS for Video Tests, supported: Windows, Unix. Disabling Video tests from the build.")
+	set (DEQP_DISABLE_VK_VIDEO_TESTS ON)
+endif ()
+
+# Central carrier for the DE_BUILD_VIDEO compile definition. Targets that compile
+# video-aware sources link this INTERFACE library instead of guarding the
+# definition themselves, so the flag cannot drift onto the wrong target.
+add_library(deqp-vk-video-config INTERFACE)
+if (NOT DEQP_DISABLE_VK_VIDEO_TESTS)
+	target_compile_definitions(deqp-vk-video-config INTERFACE DE_BUILD_VIDEO)
+endif ()
+
 if (DE_COMPILER_IS_MSC)
 	# Don't nag about std::copy for example
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_SCL_SECURE_NO_WARNINGS")
+endif ()
+
+if (DE_COMPILER_IS_GCC)
+	# Should reduce memory usage by the GCC linker, which sometimes gets killed with -9
+	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-keep-memory")
+
+	# GCC does not support FENV_ACCESS, but -frounding-math disables some optimizations that hurt us.
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -frounding-math")
+	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -frounding-math")
 endif ()
 
 if (DEQP_LOG_NODE_SOURCE)
@@ -423,11 +442,6 @@ add_subdirectory(external/vulkancts/framework/vulkan ${MAYBE_EXCLUDE_FROM_ALL})
 
 if (DE_COMPILER_IS_MSC)
 	add_compile_options(/bigobj) # Required by glsBuiltinPrecisionTests.cpp
-endif ()
-
-if (DE_COMPILER_IS_GCC)
-	# Should reduce memory usage by the GCC linker, which sometimes gets killed with -9
-	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-keep-memory")
 endif ()
 
 add_subdirectory(modules ${MAYBE_EXCLUDE_FROM_ALL})

@@ -90,6 +90,63 @@ enum
     EXTRA_RESOURCES_DESCRIPTOR_SET_INDEX = 1,
 };
 
+//! User queue
+struct UserQueue
+{
+    vk::VkQueue queue;
+    uint32_t queueFamilyIndex;
+
+    UserQueue(vk::VkQueue _queue, uint32_t _queueFamilyIndex) : queue(_queue), queueFamilyIndex(_queueFamilyIndex)
+    {
+    }
+
+    UserQueue(void) : queue(VK_NULL_HANDLE), queueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+    {
+    }
+};
+
+enum class ExecutorDescriptorMode
+{
+    DESCRIPTOR_SET,
+    DESCRIPTOR_BUFFER,
+    DESCRIPTOR_HEAP,
+};
+
+struct DescriptorData
+{
+    ExecutorDescriptorMode mode;
+    // Descriptor set data
+    vk::VkDescriptorSet extraResources = VK_NULL_HANDLE;
+
+#ifndef CTS_USES_VULKANSC
+    // VK_EXT_descriptor_buffer data
+    struct BufferDescriptor
+    {
+        vk::VkDescriptorImageInfo imageInfo;
+        vk::VkDeviceSize bufferOffset;
+        uint32_t combinedSamplerDescriptorCount;
+    };
+    std::vector<BufferDescriptor> bufferDescriptors{};
+
+    // VK_EXT_descriptor_heap data
+    struct ResourceDescriptor
+    {
+        vk::VkResourceDescriptorInfoEXT descriptorInfo;
+        vk::VkDeviceSize heapOffset;
+        vk::VkDeviceSize size;
+    };
+    struct SamplerDescriptor
+    {
+        vk::VkSamplerCreateInfo samplerCreateInfo;
+        vk::VkDeviceSize heapOffset;
+        vk::VkDeviceSize size;
+    };
+    std::vector<vk::VkDescriptorSetAndBindingMappingEXT> mappings{};
+    std::vector<ResourceDescriptor> resourceDescriptors{};
+    std::vector<SamplerDescriptor> samplerDescriptors{};
+#endif
+};
+
 //! Base class for shader executor.
 class ShaderExecutor
 {
@@ -99,6 +156,32 @@ public:
     //! Execute
     virtual void execute(int numValues, const void *const *inputs, void *const *outputs,
                          vk::VkDescriptorSet extraResources = VK_NULL_HANDLE) = 0;
+
+#ifndef CTS_USES_VULKANSC
+    virtual void executeBuffer(int numValues, const void *const *inputs, void *const *outputs,
+                               std::vector<DescriptorData::BufferDescriptor> bufferDescriptors)
+    {
+        DE_UNREF(numValues);
+        DE_UNREF(inputs);
+        DE_UNREF(outputs);
+        DE_UNREF(bufferDescriptors);
+        TCU_FAIL("Descriptor buffer is not implemented for this executor");
+    }
+    virtual void executeHeap(int numValues, const void *const *inputs, void *const *outputs,
+                             std::vector<vk::VkDescriptorSetAndBindingMappingEXT> mappings,
+                             std::vector<DescriptorData::ResourceDescriptor> resourceDescriptors,
+                             std::vector<DescriptorData::SamplerDescriptor> samplerDescriptors)
+    {
+        DE_UNREF(numValues);
+        DE_UNREF(inputs);
+        DE_UNREF(outputs);
+        DE_UNREF(mappings);
+        DE_UNREF(resourceDescriptors);
+        DE_UNREF(samplerDescriptors);
+        TCU_FAIL("Descriptor heap is not implemented for this executor");
+    }
+#endif
+
     bool areInputs16Bit(void) const;
     bool areOutputs16Bit(void) const;
     bool isOutput16Bit(const size_t ndx) const;
@@ -127,10 +210,12 @@ private:
     ShaderExecutor &operator=(const ShaderExecutor &);
 };
 
-bool executorSupported(glu::ShaderType shaderType);
+bool executorSupported(glu::ShaderType shaderType,
+                       ExecutorDescriptorMode descriptorMode = ExecutorDescriptorMode::DESCRIPTOR_SET);
 void generateSources(glu::ShaderType shaderType, const ShaderSpec &shaderSpec, vk::SourceCollections &dst);
 ShaderExecutor *createExecutor(Context &context, glu::ShaderType shaderType, const ShaderSpec &shaderSpec,
-                               vk::VkDescriptorSetLayout extraResourcesLayout = VK_NULL_HANDLE);
+                               vk::VkDescriptorSetLayout extraResourcesLayout = VK_NULL_HANDLE,
+                               const UserQueue &userQueue                     = UserQueue());
 void checkSupportShader(Context &context, const glu::ShaderType shaderType);
 
 } // namespace shaderexecutor

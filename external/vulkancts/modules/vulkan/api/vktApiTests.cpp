@@ -55,6 +55,7 @@
 #ifndef CTS_USES_VULKANSC
 #include "vktApiSmokeTests.hpp"
 #include "vktApiBufferMarkerTests.hpp"
+#include "vktApiDeviceAddressCommandsTests.hpp"
 #include "vktApiDeviceDrmPropertiesTests.hpp"
 #include "vktApiExternalMemoryTests.hpp"
 #include "vktApiToolingInfoTests.hpp"
@@ -64,6 +65,8 @@
 #include "vktApiPhysicalDeviceFormatPropertiesMaint5Tests.hpp"
 #include "vktApiFragmentShaderOutputTests.hpp"
 #include "vktApiPerformanceCountersByRegionTests.hpp"
+#include "vktApiGPAInterfaceTests.hpp"
+#include "vktApiArrayTests.hpp"
 #endif // CTS_USES_VULKANSC
 
 namespace vkt
@@ -132,10 +135,13 @@ void createApiTests(tcu::TestCaseGroup *apiTests)
     apiTests->addChild(createMaintenance5Tests(testCtx));
     apiTests->addChild(createFragmentShaderOutputTests(testCtx));
     apiTests->addChild(createMaintenance7Tests(testCtx));
+    apiTests->addChild(createDeviceAddressCommandsTests(testCtx));
 #endif
     apiTests->addChild(createExtensionDuplicatesTests(testCtx));
 #ifndef CTS_USES_VULKANSC
     apiTests->addChild(createRenderPassPerformanceCountersByRegionApiTests(testCtx));
+    apiTests->addChild(createGpaInterfaceTests(testCtx));
+    apiTests->addChild(createArrayTests(testCtx));
 #endif
 }
 

@@ -103,6 +103,10 @@ CustomInstance createInstanceWithWsi(Context &context, const Extensions &support
     if (isDisplaySurface(wsiType))
         extensions.push_back("VK_KHR_display");
 
+    // VUID-vkCreateInstance-ppEnabledExtensionNames-01388
+    if (wsiType == TYPE_DIRECT_DRM)
+        extensions.push_back("VK_EXT_direct_mode_display");
+
     // VK_EXT_swapchain_colorspace adds new surface formats. Driver can enumerate
     // the formats regardless of whether VK_EXT_swapchain_colorspace was enabled,
     // but using them without enabling the extension is not allowed. Thus we have
@@ -128,10 +132,9 @@ VkPhysicalDeviceFeatures getDeviceFeaturesForWsi(void)
     return features;
 }
 
-Move<VkDevice> createDeviceWithWsi(const vk::PlatformInterface &vkp, vk::VkInstance instance,
-                                   const InstanceInterface &vki, VkPhysicalDevice physicalDevice,
-                                   const Extensions &supportedExtensions, const uint32_t queueFamilyIndex,
-                                   const VkAllocationCallbacks *pAllocator, bool validationEnabled)
+static CustomDevice createDeviceWithWsi(const InstanceWrapper &instance, VkPhysicalDevice physicalDevice,
+                                        const Extensions &supportedExtensions, const uint32_t queueFamilyIndex,
+                                        const VkAllocationCallbacks *pAllocator)
 {
     const float queuePriorities[]              = {1.0f};
     const VkDeviceQueueCreateInfo queueInfos[] = {{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, nullptr,
@@ -158,14 +161,14 @@ Move<VkDevice> createDeviceWithWsi(const vk::PlatformInterface &vkp, vk::VkInsta
                                        extensions.empty() ? nullptr : &extensions[0],
                                        &features};
 
-    return createCustomDevice(validationEnabled, vkp, instance, vki, physicalDevice, &deviceParams, pAllocator);
+    return instance.createCustomDevice(physicalDevice, &deviceParams, pAllocator);
 }
 
 struct InstanceHelper
 {
     const vector<VkExtensionProperties> supportedExtensions;
-    const CustomInstance instance;
-    const InstanceDriver &vki;
+    const InstanceWrapper instance;
+    const InstanceInterface &vki;
 
     InstanceHelper(Context &context, Type wsiType, const VkAllocationCallbacks *pAllocator = nullptr)
         : supportedExtensions(enumerateInstanceExtensionProperties(context.getPlatformInterface(), nullptr))
@@ -179,19 +182,18 @@ struct DeviceHelper
 {
     const VkPhysicalDevice physicalDevice;
     const uint32_t queueFamilyIndex;
-    const Unique<VkDevice> device;
-    const DeviceDriver vkd;
+    const DeviceWrapper device;
+    const DeviceInterface &vkd;
     const VkQueue queue;
 
-    DeviceHelper(Context &context, const InstanceInterface &vki, VkInstance instance, VkSurfaceKHR surface,
+    DeviceHelper(const InstanceHelper &instanceHelper, VkSurfaceKHR surface,
                  const VkAllocationCallbacks *pAllocator = nullptr)
-        : physicalDevice(chooseDevice(vki, instance, context.getTestContext().getCommandLine()))
-        , queueFamilyIndex(chooseQueueFamilyIndex(vki, physicalDevice, surface))
-        , device(createDeviceWithWsi(context.getPlatformInterface(), instance, vki, physicalDevice,
-                                     enumerateDeviceExtensionProperties(vki, physicalDevice, nullptr), queueFamilyIndex,
-                                     pAllocator, context.getTestContext().getCommandLine().isValidationEnabled()))
-        , vkd(context.getPlatformInterface(), instance, *device, context.getUsedApiVersion(),
-              context.getTestContext().getCommandLine())
+        : physicalDevice(instanceHelper.instance.getPhysicalDevice())
+        , queueFamilyIndex(chooseQueueFamilyIndex(instanceHelper.vki, physicalDevice, surface))
+        , device(createDeviceWithWsi(instanceHelper.instance, physicalDevice,
+                                     enumerateDeviceExtensionProperties(instanceHelper.vki, physicalDevice, nullptr),
+                                     queueFamilyIndex, pAllocator))
+        , vkd(device.getDriver())
         , queue(getDeviceQueue(vkd, *device, queueFamilyIndex, 0))
     {
     }
@@ -385,7 +387,7 @@ tcu::TestStatus basicExtensionTest(Context &context, Type wsiType)
     const NativeObjects native(context, instHelper.supportedExtensions, wsiType, 1u, tcu::just(desiredSize));
     const Unique<VkSurfaceKHR> surface(createSurface(instHelper.vki, instHelper.instance, wsiType, native.getDisplay(),
                                                      native.getWindow(), context.getTestContext().getCommandLine()));
-    const DeviceHelper devHelper(context, instHelper.vki, instHelper.instance, *surface);
+    const DeviceHelper devHelper(instHelper, *surface);
 
     if (!de::contains(context.getInstanceExtensions().begin(), context.getInstanceExtensions().end(),
                       "VK_EXT_swapchain_colorspace"))
@@ -429,7 +431,7 @@ tcu::TestStatus colorspaceCompareTest(Context &context, TestParams params)
     const Unique<VkSurfaceKHR> surface(createSurface(instHelper.vki, instHelper.instance, params.wsiType,
                                                      native.getDisplay(), native.getWindow(),
                                                      context.getTestContext().getCommandLine()));
-    const DeviceHelper devHelper(context, instHelper.vki, instHelper.instance, *surface);
+    const DeviceHelper devHelper(instHelper, *surface);
 
     const vector<VkSurfaceFormatKHR> queriedFormats =
         getPhysicalDeviceSurfaceFormats(instHelper.vki, devHelper.physicalDevice, *surface);
@@ -457,8 +459,7 @@ tcu::TestStatus colorspaceCompareTest(Context &context, TestParams params)
     const tcu::TextureFormat textureFormat = vk::mapVkFormat(surfaceFormat.format);
     const DeviceInterface &vkd             = devHelper.vkd;
     const VkDevice device                  = *devHelper.device;
-    SimpleAllocator allocator(vkd, device,
-                              getPhysicalDeviceMemoryProperties(instHelper.vki, context.getPhysicalDevice()));
+    vk::Allocator &allocator               = devHelper.device.getAllocator();
 
     for (size_t colorspaceNdx = 0; colorspaceNdx < supportedColorSpaces.size(); ++colorspaceNdx)
     {
@@ -565,7 +566,7 @@ tcu::TestStatus surfaceFormatRenderTest(Context &context, Type wsiType, const In
     const tcu::UVec2 desiredSize(256, 256);
     const DeviceInterface &vkd = devHelper.vkd;
     const VkDevice device      = *devHelper.device;
-    SimpleAllocator allocator(vkd, device, getPhysicalDeviceMemoryProperties(instHelper.vki, devHelper.physicalDevice));
+    vk::Allocator &allocator   = devHelper.device.getAllocator();
 
     const VkSwapchainCreateInfoKHR swapchainInfo =
         getBasicSwapchainParameters(wsiType, instHelper.vki, devHelper.physicalDevice, surface, curFmt, desiredSize, 2);
@@ -696,7 +697,7 @@ tcu::TestStatus surfaceFormatRenderTests(Context &context, Type wsiType)
     const NativeObjects native(context, instHelper.supportedExtensions, wsiType, 1u, tcu::just(desiredSize));
     const Unique<VkSurfaceKHR> surface(createSurface(instHelper.vki, instHelper.instance, wsiType, native.getDisplay(),
                                                      native.getWindow(), context.getTestContext().getCommandLine()));
-    const DeviceHelper devHelper(context, instHelper.vki, instHelper.instance, *surface);
+    const DeviceHelper devHelper(instHelper, *surface);
 
     if (!de::contains(context.getInstanceExtensions().begin(), context.getInstanceExtensions().end(),
                       "VK_EXT_swapchain_colorspace"))
@@ -719,7 +720,7 @@ tcu::TestStatus surfaceFormatRenderWithHdrTests(Context &context, Type wsiType)
     const NativeObjects native(context, instHelper.supportedExtensions, wsiType, 1u, tcu::just(desiredSize));
     const Unique<VkSurfaceKHR> surface(createSurface(instHelper.vki, instHelper.instance, wsiType, native.getDisplay(),
                                                      native.getWindow(), context.getTestContext().getCommandLine()));
-    const DeviceHelper devHelper(context, instHelper.vki, instHelper.instance, *surface);
+    const DeviceHelper devHelper(instHelper, *surface);
 
     if (!de::contains(context.getInstanceExtensions().begin(), context.getInstanceExtensions().end(),
                       "VK_EXT_swapchain_colorspace"))

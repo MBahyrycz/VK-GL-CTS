@@ -299,7 +299,7 @@ VkDevice VideoBaseTestInstance::getDeviceSupportingQueue(const VkQueueFlags queu
     return m_videoDevice.getDeviceSupportingQueue(queueFlagsRequired, videoCodecOperationFlags, videoDeviceFlags);
 }
 
-const DeviceDriver &VideoBaseTestInstance::getDeviceDriver(void)
+const DeviceInterface &VideoBaseTestInstance::getDeviceDriver(void)
 {
     return m_videoDevice.getDeviceDriver();
 }
@@ -409,11 +409,11 @@ tcu::TestStatus VideoBaseTestInstance::validateEncodedContent(
             InternalError, processor.getNextFrame(&frame) > 0,
             "Expected more frames from the bitstream. Most likely an internal CTS bug, or maybe an invalid bitstream");
 
-        auto resultImage =
-            getDecodedImageFromContext(deviceContext,
-                                       basicDecoder->dpbAndOutputCoincide() ? VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR :
-                                                                              VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR,
-                                       &frame);
+        const VkImageLayout srcLayout = basicDecoder->usesGeneralLayout() ? VK_IMAGE_LAYOUT_GENERAL :
+                                                                            (basicDecoder->dpbAndOutputCoincide() ?
+                                                                                 VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR :
+                                                                                 VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR);
+        auto resultImage              = getDecodedImageFromContext(deviceContext, srcLayout, &frame);
         processor.releaseFrame(&frame);
         if (frame.displayWidth != expectedOutputExtent.width || frame.displayHeight != expectedOutputExtent.height)
         {
@@ -740,6 +740,19 @@ de::MovePtr<VkVideoEncodeUsageInfoKHR> getEncodeUsageInfo(void *pNext, VkVideoEn
     return result;
 }
 
+de::MovePtr<VkVideoDecodeUsageInfoKHR> getDecodeUsageInfo(void *pNext, VkVideoDecodeUsageFlagsKHR videoUsageHints)
+{
+    VkVideoDecodeUsageInfoKHR *decodeUsageInfo = new VkVideoDecodeUsageInfoKHR{
+        VK_STRUCTURE_TYPE_VIDEO_DECODE_USAGE_INFO_KHR, //  VkStructureType sType
+        pNext,                                         //  const void* pNext
+        videoUsageHints,                               //  VkVideoDecodeUsageFlagsKHR videoUsageHints
+    };
+
+    de::MovePtr<VkVideoDecodeUsageInfoKHR> result = de::MovePtr<VkVideoDecodeUsageInfoKHR>(decodeUsageInfo);
+
+    return result;
+}
+
 de::MovePtr<VkVideoProfileInfoKHR> getVideoProfile(VkVideoCodecOperationFlagBitsKHR videoCodecOperation, void *pNext,
                                                    VkVideoChromaSubsamplingFlagsKHR chromaSubsampling,
                                                    VkVideoComponentBitDepthFlagsKHR lumaBitDepth,
@@ -850,6 +863,9 @@ vector<AllocationPtr> getAndBindVideoSessionMemory(const DeviceInterface &vkd, c
 
     vector<AllocationPtr> allocations(videoSessionMemoryRequirements.size());
     vector<VkBindVideoSessionMemoryInfoKHR> videoBindsMemoryKHR(videoSessionMemoryRequirements.size());
+
+    if (allocations.empty())
+        return allocations;
 
     for (size_t ndx = 0; ndx < allocations.size(); ++ndx)
     {
@@ -2356,24 +2372,76 @@ void generateYCbCrFile(std::string fileName, uint32_t n_frames, uint32_t width, 
 }
 #endif
 
-const char *getVideoCodecString(VkVideoCodecOperationFlagBitsKHR codec)
+const char *getVideoCodecPathSegment(VkVideoCodecOperationFlagBitsKHR codec)
 {
-    static struct
+    switch (codec)
     {
-        VkVideoCodecOperationFlagBitsKHR eCodec;
-        const char *name;
-    } aCodecName[] = {
-        {VK_VIDEO_CODEC_OPERATION_NONE_KHR, "None"},
-        {VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR, "AVC/H.264"},
-        {VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR, "H.265/HEVC"},
-    };
-
-    for (auto &i : aCodecName)
-    {
-        if (codec == i.eCodec)
-            return aCodecName[codec].name;
+    case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR:
+        return "video.decode.h264";
+    case VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR:
+        return "video.encode.h264";
+    case VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR:
+        return "video.decode.h265";
+    case VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR:
+        return "video.encode.h265";
+    case VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR:
+        return "video.decode.av1";
+    case VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR:
+        return "video.encode.av1";
+    case VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR:
+        return "video.decode.vp9";
+    default:
+        TCU_THROW(InternalError, "Unknown video codec");
     }
 
+    return "";
+}
+
+std::string getVideoDumpPath(bool output, const std::string &testName, const std::string &codecSegment,
+                             const std::string &ext, int index)
+{
+    static const char *const dumpDir = "video_dumps";
+
+    // Tolerate a concurrent creator racing us between the exists() check and the create.
+    if (!de::FilePath(dumpDir).exists())
+    {
+        try
+        {
+            de::createDirectoryAndParents(dumpDir);
+        }
+        catch (const std::runtime_error &)
+        {
+            if (!de::FilePath(dumpDir).exists())
+                TCU_THROW(InternalError, "Unable to create path");
+        }
+    }
+
+    std::string baseName = (output ? "out_" : "in_") + codecSegment + "." + testName;
+    if (index >= 0)
+        baseName += "_" + std::to_string(index);
+    baseName += "." + ext;
+
+    return de::FilePath::join(de::FilePath(dumpDir), de::FilePath(baseName)).getPath();
+}
+
+const char *getVideoCodecString(VkVideoCodecOperationFlagBitsKHR codec)
+{
+    switch (codec)
+    {
+    case VK_VIDEO_CODEC_OPERATION_DECODE_H264_BIT_KHR:
+    case VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR:
+        return "AVC/H.264";
+    case VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR:
+    case VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR:
+        return "HEVC/H.265";
+    case VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR:
+    case VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR:
+        return "AV1";
+    case VK_VIDEO_CODEC_OPERATION_DECODE_VP9_BIT_KHR:
+        return "VP9";
+    default:
+        break;
+    }
     return "Unknown";
 }
 

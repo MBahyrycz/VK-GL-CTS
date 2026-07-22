@@ -43,8 +43,10 @@
 #include "spirv/unified1/GLSL.std.450.h"
 
 #include <cmath>
+#include <limits>
 
 #define TEST_DATASET_SIZE 10
+#define TEST_DATASET_SIZE_VEC(vecSize) ((vecSize) <= 4 ? TEST_DATASET_SIZE * vecSize : 60)
 
 #define UNDEFINED_SPIRV_TEST_TYPE "testtype"
 
@@ -80,6 +82,32 @@ using std::vector;
 using tcu::RGBA;
 using tcu::StringTemplate;
 
+enum VecSize
+{
+    VEC_SIZE_SCALAR,
+    VEC_SIZE_VEC2,
+    VEC_SIZE_VEC3,
+    VEC_SIZE_VEC4,
+#ifndef CTS_USES_VULKANSC
+    VEC_SIZE_VEC8,
+    VEC_SIZE_VEC12, // also uses OpTypeVectorIdEXT
+    VEC_SIZE_VEC1,
+#endif
+    VEC_SIZE_COUNT,
+};
+
+bool isVector(VecSize s)
+{
+    return s != VEC_SIZE_SCALAR;
+}
+
+constexpr uint32_t vecSizeNumElements[VEC_SIZE_COUNT] = {
+    1, 2,  3, 4,
+#ifndef CTS_USES_VULKANSC
+    8, 12, 1,
+#endif
+};
+
 void createComputeTest(ComputeShaderSpec &computeResources, const tcu::StringTemplate &shaderTemplate,
                        const map<string, string> &fragments, tcu::TestCaseGroup &group, const std::string &namePrefix)
 {
@@ -99,7 +127,7 @@ bool verifyComputeSwitchResult(const vector<Resource> &, const vector<Allocation
     DE_ASSERT(expectedOutputs.size() == 1);
 
     vector<uint8_t> expectedBytes;
-    expectedOutputs[0].getBytes(expectedBytes);
+    expectedOutputs[0].buffer->getBytes(expectedBytes);
     DE_ASSERT(expectedBytes.size() == sizeof(int32_t));
 
     const int32_t *obtained = reinterpret_cast<const int32_t *>(outputAllocations[0]->getHostPtr());
@@ -410,10 +438,10 @@ const char *getGLSLstd450OperationStr(uint32_t spirvOperation)
     }
 }
 
-string getBooleanResultType(uint32_t vectorSize)
+string getBooleanResultType(VecSize vecSize)
 {
-    if (vectorSize > 1)
-        return "v" + de::toString(vectorSize) + "bool";
+    if (isVector(vecSize))
+        return "v" + de::toString(vecSizeNumElements[vecSize]) + "bool";
     else
         return "bool";
 }
@@ -669,9 +697,10 @@ bool isSignedType(InputType inputType)
     return false;
 }
 
-string getOtherSizeTypes(InputType inputType, uint32_t vectorSize, InputWidth inputWidth)
+string getOtherSizeTypes(InputType inputType, VecSize vecSize, InputWidth inputWidth)
 {
     const uint32_t inputWidthValues[] = {8, 16, 32, 64};
+    const uint32_t vectorSize         = vecSizeNumElements[vecSize];
 
     for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(inputWidthValues); widthNdx++)
     {
@@ -693,7 +722,12 @@ string getOtherSizeTypes(InputType inputType, uint32_t vectorSize, InputWidth in
                 str += "%" + signPrefix + "8 = OpTypeInt 8 " + signBit + "\n";
 
                 // 8-bit vector type
-                if (vectorSize > 1)
+                if (vectorSize == 12)
+                {
+                    str += "%v" + de::toString(vectorSize) + signPrefix + "8 = OpTypeVectorIdEXT %" + signPrefix +
+                           "8 %vectorSizeConst\n";
+                }
+                else if (isVector(vecSize))
                     str += "%v" + de::toString(vectorSize) + signPrefix + "8 = OpTypeVector %" + signPrefix + "8 " +
                            de::toString(vectorSize) + "\n";
             }
@@ -704,7 +738,12 @@ string getOtherSizeTypes(InputType inputType, uint32_t vectorSize, InputWidth in
                 str += "%" + signPrefix + "16 = OpTypeInt 16 " + signBit + "\n";
 
                 // 16-bit vector type
-                if (vectorSize > 1)
+                if (vectorSize == 12)
+                {
+                    str += "%v" + de::toString(vectorSize) + signPrefix + "16 = OpTypeVectorIdEXT %" + signPrefix +
+                           "16 %vectorSizeConst\n";
+                }
+                else if (isVector(vecSize))
                     str += "%v" + de::toString(vectorSize) + signPrefix + "16 = OpTypeVector %" + signPrefix + "16 " +
                            de::toString(vectorSize) + "\n";
             }
@@ -715,7 +754,12 @@ string getOtherSizeTypes(InputType inputType, uint32_t vectorSize, InputWidth in
                 str += "%" + signPrefix + "64 = OpTypeInt 64 " + signBit + "\n";
 
                 // 64-bit vector type
-                if (vectorSize > 1)
+                if (vectorSize == 12)
+                {
+                    str += "%v" + de::toString(vectorSize) + signPrefix + "64 = OpTypeVectorIdEXT %" + signPrefix +
+                           "64 %vectorSizeConst\n";
+                }
+                else if (isVector(vecSize))
                     str += "%v" + de::toString(vectorSize) + signPrefix + "64 = OpTypeVector %" + signPrefix + "64 " +
                            de::toString(vectorSize) + "\n";
             }
@@ -728,7 +772,7 @@ string getOtherSizeTypes(InputType inputType, uint32_t vectorSize, InputWidth in
     return "";
 }
 
-string getSpirvCapabilityStr(const char *spirvCapability, InputWidth inputWidth)
+string getSpirvCapabilityStr(const char *spirvCapability, InputWidth inputWidth, VecSize vecSize)
 {
     string str = "";
 
@@ -760,12 +804,17 @@ string getSpirvCapabilityStr(const char *spirvCapability, InputWidth inputWidth)
         if (has64BitInputWidth(inputWidth))
             str += "OpCapability Int64\n";
     }
+    if (isVector(vecSize) && (vecSizeNumElements[vecSize] == 1 || vecSizeNumElements[vecSize] > 4))
+    {
+        str += "OpCapability LongVectorEXT\n";
+    }
 
     return str;
 }
 
 string getBinaryFullOperationWithInputWidthStr(string resultName, string spirvOperation, InputType inputType,
-                                               string spirvTestType, uint32_t vectorSize, InputWidth inputWidth)
+                                               string spirvTestType, uint32_t vectorSize, InputWidth inputWidth,
+                                               bool isVector)
 {
     const uint32_t inputWidthValues[] = {8, 16, 32, 64};
 
@@ -779,7 +828,7 @@ string getBinaryFullOperationWithInputWidthStr(string resultName, string spirvOp
         {
             const bool isSigned        = (inputType == typeSigned);
             const string signPrefix    = (isSigned) ? "i" : "u";
-            const string typePrefix    = (vectorSize == 1) ? "%" : "%v" + de::toString(vectorSize);
+            const string typePrefix    = (!isVector) ? "%" : "%v" + de::toString(vectorSize);
             const uint32_t input1Width = getInputWidth(inputWidth, 0);
 
             const string inputTypeStr =
@@ -889,7 +938,7 @@ public:
     typedef bool (*TernaryFilterFuncType)(T, T, T);
     typedef bool (*QuaternaryFilterFuncType)(T, T, T, T);
     SpvAsmTypeTests(tcu::TestContext &testCtx, const char *name, const char *deviceFeature, const char *spirvCapability,
-                    const char *spirvType, InputType inputType, uint32_t typeSize, uint32_t vectorSize);
+                    const char *spirvType, InputType inputType, uint32_t typeSize, VecSize vectorSize);
     ~SpvAsmTypeTests(void);
     void createTests(const char *testName, uint32_t spirvOperation, OpUnaryFuncType op, UnaryFilterFuncType filter,
                      InputRange inputRange, InputWidth inputWidth, const char *spirvExtension,
@@ -914,6 +963,7 @@ public:
     static bool filterNone(T a, T b, T c, T d);
     static bool filterZero(T a, T b);
     static bool filterNegativesAndZero(T a, T b);
+    static bool filterSignedDiv(T a, T b);
     static bool filterMinGtMax(T, T a, T b);
 
     static T zero(T);
@@ -960,13 +1010,14 @@ private:
     InputType m_inputType;
     uint32_t m_typeSize;
     uint32_t m_vectorSize;
+    VecSize m_vecSize;
     std::string m_spirvTestType;
 };
 
 template <class T>
 SpvAsmTypeTests<T>::SpvAsmTypeTests(tcu::TestContext &testCtx, const char *name, const char *deviceFeature,
                                     const char *spirvCapability, const char *spirvType, InputType inputType,
-                                    uint32_t typeSize, uint32_t vectorSize)
+                                    uint32_t typeSize, VecSize vectorSize)
     : tcu::TestCaseGroup(testCtx, name)
     , m_rnd(deStringHash(name))
     , m_deviceFeature(deviceFeature)
@@ -974,11 +1025,10 @@ SpvAsmTypeTests<T>::SpvAsmTypeTests(tcu::TestContext &testCtx, const char *name,
     , m_spirvType(spirvType)
     , m_inputType(inputType)
     , m_typeSize(typeSize)
-    , m_vectorSize(vectorSize)
+    , m_vectorSize(vecSizeNumElements[vectorSize])
+    , m_vecSize(vectorSize)
 {
     std::string scalarType;
-
-    DE_ASSERT(vectorSize >= 1 && vectorSize <= 4);
 
     if (m_inputType == TYPE_I32)
         scalarType = "i32";
@@ -993,7 +1043,7 @@ SpvAsmTypeTests<T>::SpvAsmTypeTests(tcu::TestContext &testCtx, const char *name,
     }
     else
     {
-        if (m_vectorSize > 1)
+        if (isVector(m_vecSize))
             m_spirvTestType = "v" + de::toString(m_vectorSize) + scalarType;
         else
             m_spirvTestType = scalarType;
@@ -1523,7 +1573,9 @@ void SpvAsmTypeTests<T>::createStageTests(const char *testName, OperationWrapper
     const StringTemplate scalar_pre_main("%testtype = ${scalartype}\n");
 
     const StringTemplate vector_pre_main("%scalartype = ${scalartype}\n"
-                                         "%testtype = OpTypeVector %scalartype ${vector_size}\n");
+                                         "${vectortype}\n");
+
+    const StringTemplate longvec_pre_main("${longvec}\n");
 
     const StringTemplate pre_main_consts("%c_shift  = OpConstant %u32 16\n"
                                          "${constant_zero}\n"
@@ -1652,22 +1704,57 @@ void SpvAsmTypeTests<T>::createStageTests(const char *testName, OperationWrapper
     specs["output_binding"]     = de::toString(resources.inputs.size());
     specs["shift_initializers"] = replicate(" %c_shift1", m_vectorSize);
 
-    specs["bvec"] = (m_vectorSize == 1 || m_vectorSize == 4) ?
+    specs["longvec"]    = "";
+    specs["vectortype"] = "%testtype = OpTypeVector %scalartype " + vectorSizeStr;
+    if (isVector(m_vecSize) && (m_vectorSize == 1 || m_vectorSize > 4))
+    {
+        string vecSize = std::to_string(m_vectorSize);
+        if (m_vectorSize == 12)
+        {
+            specs["vectortype"] = "%testtype = OpTypeVectorIdEXT %scalartype %vectorSizeConst\n";
+            specs["longvec"]    = "%vectorSizeConst = OpConstant %u32 " + vecSize +
+                               "\n"
+                               "%v" +
+                               vecSize +
+                               "i32 = OpTypeVectorIdEXT %i32 %vectorSizeConst\n"
+                               "%v" +
+                               vecSize +
+                               "u32 = OpTypeVectorIdEXT %u32 %vectorSizeConst\n"
+                               "%v" +
+                               vecSize +
+                               "f32 = OpTypeVectorIdEXT %f32 %vectorSizeConst\n"
+                               "%v" +
+                               vecSize + "bool = OpTypeVectorIdEXT %bool %vectorSizeConst\n";
+        }
+        else
+        {
+            specs["longvec"] = "%v" + vecSize + "i32 = OpTypeVector %i32 " + vecSize +
+                               "\n"
+                               "%v" +
+                               vecSize + "u32 = OpTypeVector %u32 " + vecSize +
+                               "\n"
+                               "%v" +
+                               vecSize + "f32 = OpTypeVector %f32 " + vecSize + "\n";
+        }
+        spirvExtensions += "OpExtension \"SPV_EXT_long_vector\"\n";
+    }
+
+    specs["bvec"] = (!isVector(m_vecSize) || m_vectorSize == 4 || m_vectorSize == 12) ?
                         ("") :
                         ("%v" + vectorSizeStr + "bool = OpTypeVector %bool " + vectorSizeStr);
 
     specs["constant_zero"] =
-        (m_vectorSize == 1) ?
+        (!isVector(m_vecSize)) ?
             ("%c_zero = OpConstant %u32 0\n") :
             ("%c_zero = OpConstantComposite %v" + vectorSizeStr + "u32" + replicate(" %c_u32_0", m_vectorSize));
 
     specs["constant_one"] =
-        (m_vectorSize == 1) ?
+        (!isVector(m_vecSize)) ?
             ("%c_one = OpConstant %u32 1\n") :
             ("%c_one = OpConstantComposite %v" + vectorSizeStr + "u32" + replicate(" %c_u32_1", m_vectorSize));
 
     specs["other_size_types"] =
-        (inputWidth == WIDTH_DEFAULT) ? ("") : getOtherSizeTypes(m_inputType, m_vectorSize, inputWidth);
+        (inputWidth == WIDTH_DEFAULT) ? ("") : getOtherSizeTypes(m_inputType, m_vecSize, inputWidth);
 
     specs["u32_function_pointer"] =
         m_spirvTestType == "i32" ? ("") :
@@ -1676,7 +1763,7 @@ void SpvAsmTypeTests<T>::createStageTests(const char *testName, OperationWrapper
     const bool is32           = (m_inputType == TYPE_I32 || m_inputType == TYPE_U32);
     const auto scalarName32   = (is32 ? ((m_inputType == TYPE_I32) ? "i32" : "u32") : "");
     specs["scalar_type_name"] = (hasScalarInputs(spirvOperation.spirvOperation) ?
-                                     (is32 ? scalarName32 : ((m_vectorSize > 1) ? "scalartype" : "testtype")) :
+                                     (is32 ? scalarName32 : ((isVector(m_vecSize)) ? "scalartype" : "testtype")) :
                                      "u32");
 
     if (spirvExtension)
@@ -1686,19 +1773,22 @@ void SpvAsmTypeTests<T>::createStageTests(const char *testName, OperationWrapper
         fragments["decoration"] += decorations[elemNdx];
     fragments["decoration"] += decoration.specialize(specs);
 
-    if (m_vectorSize > 1)
+    if (isVector(m_vecSize))
         fragments["decoration"] += vecDecoration.specialize(specs);
 
     fragments["pre_main"] = pre_pre_main.specialize(specs);
+
+    fragments["pre_main"] += longvec_pre_main.specialize(specs);
+
     if (specs["testtype"].compare(UNDEFINED_SPIRV_TEST_TYPE) == 0)
     {
-        if (m_vectorSize > 1)
+        if (isVector(m_vecSize))
             fragments["pre_main"] += vector_pre_main.specialize(specs);
         else
             fragments["pre_main"] += scalar_pre_main.specialize(specs);
     }
 
-    if (m_vectorSize > 1)
+    if (isVector(m_vecSize))
         fragments["pre_main"] += pre_main_constv.specialize(specs);
     else
         fragments["pre_main"] += pre_main_consts.specialize(specs);
@@ -1712,12 +1802,18 @@ void SpvAsmTypeTests<T>::createStageTests(const char *testName, OperationWrapper
         fragments["testfun"] += testfuns[elemNdx];
     fragments["testfun"] += operation + post_testfun.specialize(specs);
 
-    spirvCapabilities += getSpirvCapabilityStr(m_spirvCapability, inputWidth);
+    spirvCapabilities += getSpirvCapabilityStr(m_spirvCapability, inputWidth, m_vecSize);
 
     fragments["extension"]  = spirvExtensions;
     fragments["capability"] = spirvCapabilities;
 
     requiredFeaturesFromStrings(features, requiredFeatures);
+
+    if (isVector(m_vecSize) && (m_vectorSize == 1 || m_vectorSize > 4))
+    {
+        resources.usesLongVector        = true;
+        computeResources.usesLongVector = true;
+    }
 
     createTestsForAllStages(testName, defaultColors, defaultColors, fragments, resources, noExtensions, this,
                             requiredFeatures);
@@ -1764,14 +1860,14 @@ bool SpvAsmTypeTests<T>::verifyResult(const vector<Resource> &inputs, const vect
     vector<uint8_t> inputBytes[4];
     vector<uint8_t> expectedBytes;
 
-    expectedOutputs[0].getBytes(expectedBytes);
+    expectedOutputs[0].buffer->getBytes(expectedBytes);
     const uint32_t count = static_cast<uint32_t>(expectedBytes.size() / sizeof(T));
     const T *obtained    = static_cast<const T *>(outputAllocations[0]->getHostPtr());
     const T *expected    = reinterpret_cast<const T *>(&expectedBytes.front());
 
     for (uint32_t ndxCount = 0; ndxCount < inputs.size(); ndxCount++)
     {
-        inputs[ndxCount].getBytes(inputBytes[ndxCount]);
+        inputs[ndxCount].buffer->getBytes(inputBytes[ndxCount]);
         input[ndxCount] = reinterpret_cast<const T *>(&inputBytes[ndxCount].front());
     }
 
@@ -1823,14 +1919,14 @@ string SpvAsmTypeTests<T>::createConstantDeclaration(vector<T> &dataset, uint32_
     const bool isVariableTest     = (SpvOpVariable == spirvOperation);
     const bool isConstantNullTest = (SpvOpConstantNull == spirvOperation) || isVariableTest;
     const bool isConstantCompositeTest =
-        (SpvOpConstantComposite == spirvOperation) || (isConstantNullTest && m_vectorSize > 1);
+        (SpvOpConstantComposite == spirvOperation) || (isConstantNullTest && isVector(m_vecSize));
     const bool isConstantTest     = (SpvOpConstant == spirvOperation) || isConstantCompositeTest || isConstantNullTest;
     const bool isSpecConstantTest = (SpvOpSpecConstant == spirvOperation);
     const bool isSpecConstantCompositeTest = (SpvOpSpecConstantComposite == spirvOperation);
 
     const string testScalarType = (m_inputType == TYPE_I32) ? "i32" : (m_inputType == TYPE_U32) ? "u32" : "scalartype";
-    const string constantType   = (m_vectorSize > 1) ? testScalarType : m_spirvTestType;
-    const string constantName   = (m_vectorSize > 1) ? "%c_constituent_" : "%c_testtype_";
+    const string constantType   = (isVector(m_vecSize)) ? testScalarType : m_spirvTestType;
+    const string constantName   = (isVector(m_vecSize)) ? "%c_constituent_" : "%c_testtype_";
 
     string str = "";
 
@@ -1887,12 +1983,18 @@ string SpvAsmTypeTests<T>::createConstantDeclaration(vector<T> &dataset, uint32_
     {
         for (uint32_t compositeNdx = 0u; compositeNdx < (uint32_t)dataset.size(); compositeNdx++)
         {
-            str += "%c_testtype_" + de::toString(compositeNdx) + " = OpConstantComposite %" + m_spirvTestType;
+            if (isConstantNullTest && compositeNdx == 0u)
+            {
+                str += "%c_testtype_" + de::toString(compositeNdx) + " = OpConstantNull %" + m_spirvTestType;
+            }
+            else
+            {
+                str += "%c_testtype_" + de::toString(compositeNdx) + " = OpConstantComposite %" + m_spirvTestType;
 
-            for (uint32_t componentNdx = 0u; componentNdx < m_vectorSize; componentNdx++)
-                str += " %c_constituent_" +
-                       de::toString(getConstituentIndex(compositeNdx * m_vectorSize + componentNdx, m_vectorSize));
-
+                for (uint32_t componentNdx = 0u; componentNdx < m_vectorSize; componentNdx++)
+                    str += " %c_constituent_" +
+                           de::toString(getConstituentIndex(compositeNdx * m_vectorSize + componentNdx, m_vectorSize));
+            }
             str += "\n";
         }
     }
@@ -1938,7 +2040,7 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
         DE_ASSERT(!spirvExtension);
 
         const uint32_t inputSize  = TEST_DATASET_SIZE;
-        const uint32_t outputSize = TEST_DATASET_SIZE * m_vectorSize;
+        const uint32_t outputSize = TEST_DATASET_SIZE_VEC(m_vectorSize);
         vector<T> inputDataset;
 
         inputDataset.reserve(inputSize);
@@ -2003,8 +2105,8 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
     }
     else
     {
-        dataset.reserve(TEST_DATASET_SIZE * m_vectorSize);
-        getDataset(dataset, TEST_DATASET_SIZE * m_vectorSize);
+        dataset.reserve(TEST_DATASET_SIZE_VEC(m_vectorSize));
+        getDataset(dataset, TEST_DATASET_SIZE_VEC(m_vectorSize));
         const uint32_t totalElements =
             combine(resources, computeResources, dataset, (returnHighPart ? zeroFunc : operation), filter, inputRange);
 
@@ -2035,7 +2137,7 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
 {
     const bool isBoolean      = isBooleanResultTest(spirvOperation);
     const string resultName   = (returnHighPart || isBoolean) ? "%op_result_pre" : "%op_result";
-    const string resultType   = isBoolean ? getBooleanResultType(m_vectorSize) : m_spirvTestType;
+    const string resultType   = isBoolean ? getBooleanResultType(m_vecSize) : m_spirvTestType;
     OpBinaryFuncType zeroFunc = &zero;
     vector<T> dataset;
     vector<string> decorations;
@@ -2047,8 +2149,8 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
     map<string, string> specs;
     string full_operation;
 
-    dataset.reserve(TEST_DATASET_SIZE * m_vectorSize);
-    getDataset(dataset, TEST_DATASET_SIZE * m_vectorSize);
+    dataset.reserve(TEST_DATASET_SIZE_VEC(m_vectorSize));
+    getDataset(dataset, TEST_DATASET_SIZE_VEC(m_vectorSize));
     const uint32_t totalElements =
         combine(resources, computeResources, dataset, (returnHighPart ? zeroFunc : operation), filter, inputRange);
 
@@ -2072,8 +2174,9 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
                                  resultName + " = " + getSpvOperationStr(spirvOperation) + " %" + resultType +
                                      " %input0_val %input1_val\n";
         else
-            full_operation = getBinaryFullOperationWithInputWidthStr(
-                resultName, getSpvOperationStr(spirvOperation), m_inputType, m_spirvTestType, m_vectorSize, inputWidth);
+            full_operation =
+                getBinaryFullOperationWithInputWidthStr(resultName, getSpvOperationStr(spirvOperation), m_inputType,
+                                                        m_spirvTestType, m_vectorSize, inputWidth, isVector(m_vecSize));
     }
     else
     {
@@ -2115,8 +2218,8 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
     map<string, string> fragments;
     map<string, string> specs;
 
-    dataset.reserve(TEST_DATASET_SIZE * m_vectorSize);
-    getDataset(dataset, TEST_DATASET_SIZE * m_vectorSize);
+    dataset.reserve(TEST_DATASET_SIZE_VEC(m_vectorSize));
+    getDataset(dataset, TEST_DATASET_SIZE_VEC(m_vectorSize));
     const uint32_t totalElements =
         combine(resources, computeResources, dataset, (returnHighPart ? zeroFunc : operation), filter, inputRange);
 
@@ -2170,8 +2273,8 @@ void SpvAsmTypeTests<T>::createTests(const char *testName, uint32_t spirvOperati
     map<string, string> specs;
     string full_operation;
 
-    dataset.reserve(TEST_DATASET_SIZE * m_vectorSize);
-    getDataset(dataset, TEST_DATASET_SIZE * m_vectorSize);
+    dataset.reserve(TEST_DATASET_SIZE_VEC(m_vectorSize));
+    getDataset(dataset, TEST_DATASET_SIZE_VEC(m_vectorSize));
     const uint32_t totalElements =
         combine(resources, computeResources, dataset, (returnHighPart ? zeroFunc : operation), filter, inputRange);
 
@@ -2435,7 +2538,7 @@ void SpvAsmTypeTests<T>::createSwitchTests(void)
 
     fragments["testfun"] = testfun.specialize(specs);
 
-    spirvCapabilities += getSpirvCapabilityStr(m_spirvCapability, WIDTH_DEFAULT);
+    spirvCapabilities += getSpirvCapabilityStr(m_spirvCapability, WIDTH_DEFAULT, m_vecSize);
 
     fragments["extension"]  = spirvExtensions;
     fragments["capability"] = spirvCapabilities;
@@ -2480,7 +2583,7 @@ void SpvAsmTypeTests<T>::finalizeFullOperation(string &fullOperation, const stri
 
         const bool signedness      = (m_inputType == TYPE_I16);
         const string convertOp     = signedness ? "OpSConvert" : "OpUConvert";
-        const string convertPrefix = (m_vectorSize == 1) ? "" : "v" + de::toString(m_vectorSize);
+        const string convertPrefix = (!isVector(m_vecSize)) ? "" : "v" + de::toString(m_vectorSize);
         const string convertType   = convertPrefix + "u32";
 
         // Zero extend value to double-width value, then return high part
@@ -2490,7 +2593,7 @@ void SpvAsmTypeTests<T>::finalizeFullOperation(string &fullOperation, const stri
     }
     else if (isBooleanResult)
     {
-        const string selectType = (m_vectorSize == 1) ? ("u32") : ("v" + de::toString(m_vectorSize) + "u32");
+        const string selectType = (!isVector(m_vecSize)) ? ("u32") : ("v" + de::toString(m_vectorSize) + "u32");
 
         // Convert boolean values to result format
         if (m_inputType == TYPE_U32)
@@ -2556,6 +2659,18 @@ bool SpvAsmTypeTests<T>::filterNegativesAndZero(T a, T b)
 }
 
 template <class T>
+bool SpvAsmTypeTests<T>::filterSignedDiv(T a, T b)
+{
+    // We cannot divide by zero, and we cannot divide the min by -1.
+    if (b == static_cast<T>(0))
+        return false;
+    else if (b == static_cast<T>(-1) && a == std::numeric_limits<T>::min())
+        return false;
+    else
+        return true;
+}
+
+template <class T>
 bool SpvAsmTypeTests<T>::filterMinGtMax(T, T a, T b)
 {
     if (a > b)
@@ -2602,13 +2717,13 @@ std::string SpvAsmTypeTests<T>::replicate(const std::string &replicant, const ui
 class SpvAsmTypeInt8Tests : public SpvAsmTypeTests<int8_t>
 {
 public:
-    SpvAsmTypeInt8Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeInt8Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeInt8Tests(void);
     void getDataset(vector<int8_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<int8_t> &data);
 };
 
-SpvAsmTypeInt8Tests::SpvAsmTypeInt8Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeInt8Tests::SpvAsmTypeInt8Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "i8", nullptr, "Int8", "OpTypeInt 8 1", TYPE_I8, 8, vectorSize)
 {
     m_cases[0] = -42;
@@ -2647,13 +2762,13 @@ void SpvAsmTypeInt8Tests::pushResource(vector<Resource> &resource, const vector<
 class SpvAsmTypeInt16Tests : public SpvAsmTypeTests<int16_t>
 {
 public:
-    SpvAsmTypeInt16Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeInt16Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeInt16Tests(void);
     void getDataset(vector<int16_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<int16_t> &data);
 };
 
-SpvAsmTypeInt16Tests::SpvAsmTypeInt16Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeInt16Tests::SpvAsmTypeInt16Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "i16", "shaderInt16", "Int16", "OpTypeInt 16 1", TYPE_I16, 16, vectorSize)
 {
     m_cases[0] = -3221;
@@ -2692,13 +2807,13 @@ void SpvAsmTypeInt16Tests::pushResource(vector<Resource> &resource, const vector
 class SpvAsmTypeInt32Tests : public SpvAsmTypeTests<int32_t>
 {
 public:
-    SpvAsmTypeInt32Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeInt32Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeInt32Tests(void);
     void getDataset(vector<int32_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<int32_t> &data);
 };
 
-SpvAsmTypeInt32Tests::SpvAsmTypeInt32Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeInt32Tests::SpvAsmTypeInt32Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "i32", nullptr, nullptr, "OpTypeInt 32 1", TYPE_I32, 32, vectorSize)
 {
     m_cases[0] = -3221;
@@ -2737,13 +2852,13 @@ void SpvAsmTypeInt32Tests::pushResource(vector<Resource> &resource, const vector
 class SpvAsmTypeInt64Tests : public SpvAsmTypeTests<int64_t>
 {
 public:
-    SpvAsmTypeInt64Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeInt64Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeInt64Tests(void);
     void getDataset(vector<int64_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<int64_t> &data);
 };
 
-SpvAsmTypeInt64Tests::SpvAsmTypeInt64Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeInt64Tests::SpvAsmTypeInt64Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "i64", "shaderInt64", "Int64", "OpTypeInt 64 1", TYPE_I64, 64, vectorSize)
 {
     m_cases[0] = 3210;
@@ -2782,13 +2897,13 @@ void SpvAsmTypeInt64Tests::pushResource(vector<Resource> &resource, const vector
 class SpvAsmTypeUint8Tests : public SpvAsmTypeTests<uint8_t>
 {
 public:
-    SpvAsmTypeUint8Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeUint8Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeUint8Tests(void);
     void getDataset(vector<uint8_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<uint8_t> &data);
 };
 
-SpvAsmTypeUint8Tests::SpvAsmTypeUint8Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeUint8Tests::SpvAsmTypeUint8Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "u8", nullptr, "Int8", "OpTypeInt 8 0", TYPE_U8, 8, vectorSize)
 {
     m_cases[0] = 0;
@@ -2826,13 +2941,13 @@ void SpvAsmTypeUint8Tests::pushResource(vector<Resource> &resource, const vector
 class SpvAsmTypeUint16Tests : public SpvAsmTypeTests<uint16_t>
 {
 public:
-    SpvAsmTypeUint16Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeUint16Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeUint16Tests(void);
     void getDataset(vector<uint16_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<uint16_t> &data);
 };
 
-SpvAsmTypeUint16Tests::SpvAsmTypeUint16Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeUint16Tests::SpvAsmTypeUint16Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "u16", "shaderInt16", "Int16", "OpTypeInt 16 0", TYPE_U16, 16, vectorSize)
 {
     m_cases[0] = 0;
@@ -2870,13 +2985,13 @@ void SpvAsmTypeUint16Tests::pushResource(vector<Resource> &resource, const vecto
 class SpvAsmTypeUint32Tests : public SpvAsmTypeTests<uint32_t>
 {
 public:
-    SpvAsmTypeUint32Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeUint32Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeUint32Tests(void);
     void getDataset(vector<uint32_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<uint32_t> &data);
 };
 
-SpvAsmTypeUint32Tests::SpvAsmTypeUint32Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeUint32Tests::SpvAsmTypeUint32Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "u32", nullptr, nullptr, "OpTypeInt 32 0", TYPE_U32, 32, vectorSize)
 {
     m_cases[0] = 0;
@@ -2914,13 +3029,13 @@ void SpvAsmTypeUint32Tests::pushResource(vector<Resource> &resource, const vecto
 class SpvAsmTypeUint64Tests : public SpvAsmTypeTests<uint64_t>
 {
 public:
-    SpvAsmTypeUint64Tests(tcu::TestContext &testCtx, uint32_t vectorSize);
+    SpvAsmTypeUint64Tests(tcu::TestContext &testCtx, VecSize vectorSize);
     ~SpvAsmTypeUint64Tests(void);
     void getDataset(vector<uint64_t> &input, uint32_t numElements);
     void pushResource(vector<Resource> &resource, const vector<uint64_t> &data);
 };
 
-SpvAsmTypeUint64Tests::SpvAsmTypeUint64Tests(tcu::TestContext &testCtx, uint32_t vectorSize)
+SpvAsmTypeUint64Tests::SpvAsmTypeUint64Tests(tcu::TestContext &testCtx, VecSize vectorSize)
     : SpvAsmTypeTests(testCtx, "u64", "shaderInt64", "Int64", "OpTypeInt 64 0", TYPE_U64, 64, vectorSize)
 {
     m_cases[0] = 3210;
@@ -3702,6 +3817,11 @@ public:
 #define U32_FILTER_NEGATIVES_AND_ZERO SpvAsmTypeUint32Tests::filterNegativesAndZero
 #define U64_FILTER_NEGATIVES_AND_ZERO SpvAsmTypeUint64Tests::filterNegativesAndZero
 
+#define I8_FILTER_SIGNED_DIV SpvAsmTypeInt8Tests::filterSignedDiv
+#define I16_FILTER_SIGNED_DIV SpvAsmTypeInt16Tests::filterSignedDiv
+#define I32_FILTER_SIGNED_DIV SpvAsmTypeInt32Tests::filterSignedDiv
+#define I64_FILTER_SIGNED_DIV SpvAsmTypeInt64Tests::filterSignedDiv
+
 #define I8_FILTER_MIN_GT_MAX SpvAsmTypeInt8Tests::filterMinGtMax
 #define I16_FILTER_MIN_GT_MAX SpvAsmTypeInt16Tests::filterMinGtMax
 #define I32_FILTER_MIN_GT_MAX SpvAsmTypeInt32Tests::filterMinGtMax
@@ -3737,427 +3857,354 @@ const string bitFieldTestPostfix[] = {
 //  'W': bit width of some parameters in bit field and shift operations can be different from Result and Base
 //  'N': create 16-bit tests without 'test_high_part_zero' variants
 
-#define MAKE_TEST_S_I_8136(name, spirvOp, op, filter, inputRange, extension)                                           \
-    for (uint32_t ndx = 0; ndx < 1; ++ndx)                                                                             \
-    {                                                                                                                  \
-        int8Tests[ndx]->createTests((name), (spirvOp), TestMathInt8::test_##op, I8_##filter, inputRange,               \
-                                    WIDTH_DEFAULT, (extension));                                                       \
-        int16Tests[ndx]->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathInt16::test_##op, I16_##filter, \
-                                     inputRange, WIDTH_DEFAULT, (extension), true);                                    \
-        int32Tests[ndx]->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int64Tests[ndx]->createTests((name), (spirvOp), TestMathInt64::test_##op, I64_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
+// scalar..vec4, vec8, vec12, vec1 (uses OpTypeVectorIdEXT)
+static constexpr uint32_t numVectorSizes = static_cast<uint32_t>(VEC_SIZE_COUNT);
+
+// Single-element macros for per-vec-size lazy initialization
+
+// Signed int: all 4 widths with int16 high-part-zero variant
+#define CREATE_I_8136(name, spirvOp, op, filter, inputRange, extension)                                           \
+    int8Tests->createTests((name), (spirvOp), TestMathInt8::test_##op, I8_##filter, inputRange, WIDTH_DEFAULT,    \
+                           (extension));                                                                          \
+    int16Tests->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));                                                                         \
+    int16Tests->createTests((name "_test_high_part_zero"), (spirvOp), TestMathInt16::test_##op, I16_##filter,     \
+                            inputRange, WIDTH_DEFAULT, (extension), true);                                        \
+    int32Tests->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));                                                                         \
+    int64Tests->createTests((name), (spirvOp), TestMathInt64::test_##op, I64_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));
+
+// Signed int: all 4 widths, no high-part-zero
+#define CREATE_I_8136_N(name, spirvOp, op, filter, inputRange, extension)                                         \
+    int8Tests->createTests((name), (spirvOp), TestMathInt8::test_##op, I8_##filter, inputRange, WIDTH_DEFAULT,    \
+                           (extension));                                                                          \
+    int16Tests->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));                                                                         \
+    int32Tests->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));                                                                         \
+    int64Tests->createTests((name), (spirvOp), TestMathInt64::test_##op, I64_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));
+
+// Signed int: bit shift width variants
+#define CREATE_I_8136_W(name, spirvOp, op, filter, inputRange, extension)                                      \
+    for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitShiftTestPostfix); ++widthNdx)                \
+    {                                                                                                          \
+        const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8 + widthNdx);                             \
+        int8Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),                \
+                               TestMathInt8::test_##op, I8_##filter, inputRange, inputWidth, (extension));     \
+        int16Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                TestMathInt16::test_##op, I16_##filter, inputRange, inputWidth, (extension));  \
+        int16Tests->createTests(string(name + bitShiftTestPostfix[widthNdx] + "_test_high_part_zero").c_str(), \
+                                (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange, inputWidth,     \
+                                (extension), true);                                                            \
+        int32Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                TestMathInt32::test_##op, I32_##filter, inputRange, inputWidth, (extension));  \
+        int64Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                TestMathInt64::test_##op, I64_##filter, inputRange, inputWidth, (extension));  \
     }
 
-#define MAKE_TEST_V_I_8136(name, spirvOp, op, filter, inputRange, extension)                                           \
-    for (uint32_t ndx = 1; ndx < 4; ++ndx)                                                                             \
-    {                                                                                                                  \
-        int8Tests[ndx]->createTests((name), (spirvOp), TestMathInt8::test_##op, I8_##filter, inputRange,               \
-                                    WIDTH_DEFAULT, (extension));                                                       \
-        int16Tests[ndx]->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathInt16::test_##op, I16_##filter, \
-                                     inputRange, WIDTH_DEFAULT, (extension), true);                                    \
-        int32Tests[ndx]->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int64Tests[ndx]->createTests((name), (spirvOp), TestMathInt64::test_##op, I64_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-    }
-
-#define MAKE_TEST_SV_I_8136(name, spirvOp, op, filter, inputRange, extension)                                          \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                             \
-    {                                                                                                                  \
-        int8Tests[ndx]->createTests((name), (spirvOp), TestMathInt8::test_##op, I8_##filter, inputRange,               \
-                                    WIDTH_DEFAULT, (extension));                                                       \
-        int16Tests[ndx]->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathInt16::test_##op, I16_##filter, \
-                                     inputRange, WIDTH_DEFAULT, (extension), true);                                    \
-        int32Tests[ndx]->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int64Tests[ndx]->createTests((name), (spirvOp), TestMathInt64::test_##op, I64_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-    }
-
-#define MAKE_TEST_SV_I_8136_N(name, spirvOp, op, filter, inputRange, extension)                             \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                  \
-    {                                                                                                       \
-        int8Tests[ndx]->createTests((name), (spirvOp), TestMathInt8::test_##op, I8_##filter, inputRange,    \
-                                    WIDTH_DEFAULT, (extension));                                            \
-        int16Tests[ndx]->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange, \
-                                     WIDTH_DEFAULT, (extension));                                           \
-        int32Tests[ndx]->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange, \
-                                     WIDTH_DEFAULT, (extension));                                           \
-        int64Tests[ndx]->createTests((name), (spirvOp), TestMathInt64::test_##op, I64_##filter, inputRange, \
-                                     WIDTH_DEFAULT, (extension));                                           \
-    }
-
-#define MAKE_TEST_SV_I_8136_W(name, spirvOp, op, filter, inputRange, extension)                                        \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                             \
-        for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitShiftTestPostfix); ++widthNdx)                    \
-        {                                                                                                              \
-            const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8 + widthNdx);                                 \
-                                                                                                                       \
-            int8Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
-                                        TestMathInt8::test_##op, I8_##filter, inputRange, inputWidth, (extension));    \
-            int16Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),              \
-                                         TestMathInt16::test_##op, I16_##filter, inputRange, inputWidth, (extension)); \
-            int16Tests[ndx]->createTests(                                                                              \
-                string(name + bitShiftTestPostfix[widthNdx] + "_test_high_part_zero").c_str(), (spirvOp),              \
-                TestMathInt16::test_##op, I16_##filter, inputRange, inputWidth, (extension), true);                    \
-            int32Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),              \
-                                         TestMathInt32::test_##op, I32_##filter, inputRange, inputWidth, (extension)); \
-            int64Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),              \
-                                         TestMathInt64::test_##op, I64_##filter, inputRange, inputWidth, (extension)); \
-        }
-
-#define MAKE_TEST_SV_I_8136_WN(name, spirvOp, op, filter, inputRange, extension)                                       \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                             \
-        for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++widthNdx)                    \
-        {                                                                                                              \
-            const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8_8 + widthNdx);                               \
-                                                                                                                       \
-            int8Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),               \
-                                        TestMathInt8::test_##op, I8_##filter, inputRange, inputWidth, (extension));    \
-            int16Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),              \
-                                         TestMathInt16::test_##op, I16_##filter, inputRange, inputWidth, (extension)); \
-            int32Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),              \
-                                         TestMathInt32::test_##op, I32_##filter, inputRange, inputWidth, (extension)); \
-            int64Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),              \
-                                         TestMathInt64::test_##op, I64_##filter, inputRange, inputWidth, (extension)); \
-        }
-
-#define MAKE_TEST_SV_I_1(name, spirvOp, op, filter, inputRange, extension)                                             \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                             \
-    {                                                                                                                  \
-        int16Tests[ndx]->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange,            \
-                                     WIDTH_DEFAULT, (extension));                                                      \
-        int16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathInt16::test_##op, I16_##filter, \
-                                     inputRange, WIDTH_DEFAULT, (extension), true);                                    \
-    }
-
-#define MAKE_TEST_SV_I_3(name, spirvOp, op, filter, inputRange, extension)                                  \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                  \
-        int32Tests[ndx]->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange, \
-                                     WIDTH_DEFAULT, (extension));
-
-#define MAKE_TEST_SV_I_3_W(name, spirvOp, op, filter, inputRange, extension)                           \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                             \
-        for (uint32_t width = 0; width < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++width)             \
-        {                                                                                              \
-            int32Tests[ndx]->createTests(string(name + bitFieldTestPostfix[width]).c_str(), (spirvOp), \
-                                         TestMathInt32::test_##op, I32_##filter, inputRange,           \
-                                         InputWidth(WIDTH_8_8 + width), (extension));                  \
-        }
-
-#define MAKE_TEST_S_U_8136(name, spirvOp, op, filter, inputRange, extension)                                  \
-    for (uint32_t ndx = 0; ndx < 1; ++ndx)                                                                    \
+// Signed int: bit field width variants, no high-part-zero
+#define CREATE_I_8136_WN(name, spirvOp, op, filter, inputRange, extension)                                    \
+    for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++widthNdx)               \
     {                                                                                                         \
-        uint8Tests[ndx]->createTests((name), (spirvOp), TestMathUint8::test_##op, U8_##filter, inputRange,    \
-                                     WIDTH_DEFAULT, (extension));                                             \
-        uint16Tests[ndx]->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op,    \
-                                      U16_##filter, inputRange, WIDTH_DEFAULT, (extension), true);            \
-        uint32Tests[ndx]->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint64Tests[ndx]->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
+        const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8_8 + widthNdx);                          \
+        int8Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                               TestMathInt8::test_##op, I8_##filter, inputRange, inputWidth, (extension));    \
+        int16Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),              \
+                                TestMathInt16::test_##op, I16_##filter, inputRange, inputWidth, (extension)); \
+        int32Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),              \
+                                TestMathInt32::test_##op, I32_##filter, inputRange, inputWidth, (extension)); \
+        int64Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),              \
+                                TestMathInt64::test_##op, I64_##filter, inputRange, inputWidth, (extension)); \
     }
 
-#define MAKE_TEST_V_U_8136(name, spirvOp, op, filter, inputRange, extension)                                  \
-    for (uint32_t ndx = 1; ndx < 4; ++ndx)                                                                    \
-    {                                                                                                         \
-        uint16Tests[ndx]->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op,    \
-                                      U16_##filter, inputRange, WIDTH_DEFAULT, (extension), true);            \
-        uint32Tests[ndx]->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint64Tests[ndx]->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
+// Signed int: int16 only
+#define CREATE_I_1(name, spirvOp, op, filter, inputRange, extension)                                              \
+    int16Tests->createTests((name), (spirvOp), TestMathInt16::test_##op, I16_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));                                                                         \
+    int16Tests->createTests((name "_test_high_part_zero"), (spirvOp), TestMathInt16::test_##op, I16_##filter,     \
+                            inputRange, WIDTH_DEFAULT, (extension), true);
+
+// Signed int: int32 only
+#define CREATE_I_3(name, spirvOp, op, filter, inputRange, extension)                                              \
+    int32Tests->createTests((name), (spirvOp), TestMathInt32::test_##op, I32_##filter, inputRange, WIDTH_DEFAULT, \
+                            (extension));
+
+// Signed int: int32 only, bit field width variants
+#define CREATE_I_3_W(name, spirvOp, op, filter, inputRange, extension)                                             \
+    for (uint32_t width = 0; width < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++width)                             \
+    {                                                                                                              \
+        int32Tests->createTests(string(name + bitFieldTestPostfix[width]).c_str(), (spirvOp),                      \
+                                TestMathInt32::test_##op, I32_##filter, inputRange, InputWidth(WIDTH_8_8 + width), \
+                                (extension));                                                                      \
     }
 
-#define MAKE_TEST_SV_U_8136(name, spirvOp, op, filter, inputRange, extension)                                 \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                    \
-    {                                                                                                         \
-        uint8Tests[ndx]->createTests((name), (spirvOp), TestMathUint8::test_##op, U8_##filter, inputRange,    \
-                                     WIDTH_DEFAULT, (extension));                                             \
-        uint16Tests[ndx]->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op,    \
-                                      U16_##filter, inputRange, WIDTH_DEFAULT, (extension), true);            \
-        uint32Tests[ndx]->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint64Tests[ndx]->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
+// Unsigned int: all 4 widths with uint16 high-part-zero variant
+#define CREATE_U_8136(name, spirvOp, op, filter, inputRange, extension)                                             \
+    uint8Tests->createTests((name), (spirvOp), TestMathUint8::test_##op, U8_##filter, inputRange, WIDTH_DEFAULT,    \
+                            (extension));                                                                           \
+    uint16Tests->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint16Tests->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op, U16_##filter,     \
+                             inputRange, WIDTH_DEFAULT, (extension), true);                                         \
+    uint32Tests->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint64Tests->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));
+
+// Unsigned int: all 4 widths, no high-part-zero
+#define CREATE_U_8136_N(name, spirvOp, op, filter, inputRange, extension)                                           \
+    uint8Tests->createTests((name), (spirvOp), TestMathUint8::test_##op, U8_##filter, inputRange, WIDTH_DEFAULT,    \
+                            (extension));                                                                           \
+    uint16Tests->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint32Tests->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint64Tests->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));
+
+// Unsigned int: bit shift width variants
+#define CREATE_U_8136_W(name, spirvOp, op, filter, inputRange, extension)                                       \
+    for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitShiftTestPostfix); ++widthNdx)                 \
+    {                                                                                                           \
+        const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8 + widthNdx);                              \
+        uint8Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),                \
+                                TestMathUint8::test_##op, U8_##filter, inputRange, inputWidth, (extension));    \
+        uint16Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                 TestMathUint16::test_##op, U16_##filter, inputRange, inputWidth, (extension)); \
+        uint16Tests->createTests(string(name + bitShiftTestPostfix[widthNdx] + "_test_high_part_zero").c_str(), \
+                                 (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, inputWidth,    \
+                                 (extension), true);                                                            \
+        uint32Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                 TestMathUint32::test_##op, U32_##filter, inputRange, inputWidth, (extension)); \
+        uint64Tests->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                 TestMathUint64::test_##op, U64_##filter, inputRange, inputWidth, (extension)); \
     }
 
-#define MAKE_TEST_SV_U_8136_N(name, spirvOp, op, filter, inputRange, extension)                               \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                    \
-    {                                                                                                         \
-        uint8Tests[ndx]->createTests((name), (spirvOp), TestMathUint8::test_##op, U8_##filter, inputRange,    \
-                                     WIDTH_DEFAULT, (extension));                                             \
-        uint16Tests[ndx]->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint32Tests[ndx]->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint64Tests[ndx]->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
+// Unsigned int: bit field width variants, no high-part-zero
+#define CREATE_U_8136_WN(name, spirvOp, op, filter, inputRange, extension)                                      \
+    for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++widthNdx)                 \
+    {                                                                                                           \
+        const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8_8 + widthNdx);                            \
+        uint8Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),                \
+                                TestMathUint8::test_##op, U8_##filter, inputRange, inputWidth, (extension));    \
+        uint16Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                 TestMathUint16::test_##op, U16_##filter, inputRange, inputWidth, (extension)); \
+        uint32Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                 TestMathUint32::test_##op, U32_##filter, inputRange, inputWidth, (extension)); \
+        uint64Tests->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),               \
+                                 TestMathUint64::test_##op, U64_##filter, inputRange, inputWidth, (extension)); \
     }
 
-#define MAKE_TEST_SV_U_8136_W(name, spirvOp, op, filter, inputRange, extension)                                       \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                            \
-        for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitShiftTestPostfix); ++widthNdx)                   \
-        {                                                                                                             \
-            const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8 + widthNdx);                                \
-                                                                                                                      \
-            uint8Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),             \
-                                         TestMathUint8::test_##op, U8_##filter, inputRange, inputWidth, (extension)); \
-            uint16Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),            \
-                                          TestMathUint16::test_##op, U16_##filter, inputRange, inputWidth,            \
-                                          (extension));                                                               \
-            uint16Tests[ndx]->createTests(                                                                            \
-                string(name + bitShiftTestPostfix[widthNdx] + "_test_high_part_zero").c_str(), (spirvOp),             \
-                TestMathUint16::test_##op, U16_##filter, inputRange, inputWidth, (extension), true);                  \
-            uint32Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),            \
-                                          TestMathUint32::test_##op, U32_##filter, inputRange, inputWidth,            \
-                                          (extension));                                                               \
-            uint64Tests[ndx]->createTests(string(name + bitShiftTestPostfix[widthNdx]).c_str(), (spirvOp),            \
-                                          TestMathUint64::test_##op, U64_##filter, inputRange, inputWidth,            \
-                                          (extension));                                                               \
-        }
+// Unsigned int: uint16 only
+#define CREATE_U_1(name, spirvOp, op, filter, inputRange, extension)                                                \
+    uint16Tests->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint16Tests->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op, U16_##filter,     \
+                             inputRange, WIDTH_DEFAULT, (extension), true);
 
-#define MAKE_TEST_SV_U_8136_WN(name, spirvOp, op, filter, inputRange, extension)                                      \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                            \
-        for (uint32_t widthNdx = 0; widthNdx < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++widthNdx)                   \
-        {                                                                                                             \
-            const InputWidth inputWidth = static_cast<InputWidth>(WIDTH_8_8 + widthNdx);                              \
-                                                                                                                      \
-            uint8Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),             \
-                                         TestMathUint8::test_##op, U8_##filter, inputRange, inputWidth, (extension)); \
-            uint16Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),            \
-                                          TestMathUint16::test_##op, U16_##filter, inputRange, inputWidth,            \
-                                          (extension));                                                               \
-            uint32Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),            \
-                                          TestMathUint32::test_##op, U32_##filter, inputRange, inputWidth,            \
-                                          (extension));                                                               \
-            uint64Tests[ndx]->createTests(string(name + bitFieldTestPostfix[widthNdx]).c_str(), (spirvOp),            \
-                                          TestMathUint64::test_##op, U64_##filter, inputRange, inputWidth,            \
-                                          (extension));                                                               \
-        }
+// Unsigned int: uint32 only
+#define CREATE_U_3(name, spirvOp, op, filter, inputRange, extension)                                                \
+    uint32Tests->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));
 
-#define MAKE_TEST_SV_U_1(name, spirvOp, op, filter, inputRange, extension)                                    \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                    \
-    {                                                                                                         \
-        uint16Tests[ndx]->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));                                            \
-        uint16Tests[ndx]->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op,    \
-                                      U16_##filter, inputRange, WIDTH_DEFAULT, (extension), true);            \
+// Unsigned int: uint32 only, bit field width variants
+#define CREATE_U_3_W(name, spirvOp, op, filter, inputRange, extension)                                               \
+    for (uint32_t width = 0; width < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++width)                               \
+    {                                                                                                                \
+        uint32Tests->createTests(string(name + bitFieldTestPostfix[width]).c_str(), (spirvOp),                       \
+                                 TestMathUint32::test_##op, U32_##filter, inputRange, InputWidth(WIDTH_8_8 + width), \
+                                 (extension));                                                                       \
     }
 
-#define MAKE_TEST_SV_U_3(name, spirvOp, op, filter, inputRange, extension)                                    \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                                    \
-        uint32Tests[ndx]->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, \
-                                      WIDTH_DEFAULT, (extension));
+// Unsigned int: uint16+uint32+uint64 only (no uint8), for vector-only constant operations
+#define CREATE_U_163264(name, spirvOp, op, filter, inputRange, extension)                                           \
+    uint16Tests->createTests((name), (spirvOp), TestMathUint16::test_##op, U16_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint16Tests->createTests((name "_test_high_part_zero"), (spirvOp), TestMathUint16::test_##op, U16_##filter,     \
+                             inputRange, WIDTH_DEFAULT, (extension), true);                                         \
+    uint32Tests->createTests((name), (spirvOp), TestMathUint32::test_##op, U32_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));                                                                          \
+    uint64Tests->createTests((name), (spirvOp), TestMathUint64::test_##op, U64_##filter, inputRange, WIDTH_DEFAULT, \
+                             (extension));
 
-#define MAKE_TEST_SV_U_3_W(name, spirvOp, op, filter, inputRange, extension)                            \
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)                                                              \
-        for (uint32_t width = 0; width < DE_LENGTH_OF_ARRAY(bitFieldTestPostfix); ++width)              \
-        {                                                                                               \
-            uint32Tests[ndx]->createTests(string(name + bitFieldTestPostfix[width]).c_str(), (spirvOp), \
-                                          TestMathUint32::test_##op, U32_##filter, inputRange,          \
-                                          InputWidth(WIDTH_8_8 + width), (extension));                  \
-        }
+static void populateSingleVecSizeTests(tcu::TestCaseGroup *group, uint32_t vecSizeIdx)
+{
+    tcu::TestContext &testCtx = group->getTestContext();
+    VecSize vectorSize        = (VecSize)vecSizeIdx;
+    bool isScalar             = (vectorSize == VEC_SIZE_SCALAR);
+
+    de::MovePtr<SpvAsmTypeInt8Tests> int8Tests(new SpvAsmTypeInt8Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeInt16Tests> int16Tests(new SpvAsmTypeInt16Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeInt32Tests> int32Tests(new SpvAsmTypeInt32Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeInt64Tests> int64Tests(new SpvAsmTypeInt64Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeUint8Tests> uint8Tests(new SpvAsmTypeUint8Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeUint16Tests> uint16Tests(new SpvAsmTypeUint16Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeUint32Tests> uint32Tests(new SpvAsmTypeUint32Tests(testCtx, vectorSize));
+    de::MovePtr<SpvAsmTypeUint64Tests> uint64Tests(new SpvAsmTypeUint64Tests(testCtx, vectorSize));
+
+    CREATE_I_8136("negate", SpvOpSNegate, negate, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("add", SpvOpIAdd, add, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("sub", SpvOpISub, sub, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("mul", SpvOpIMul, mul, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("div", SpvOpSDiv, div, FILTER_SIGNED_DIV, RANGE_FULL, nullptr)
+    CREATE_U_8136("div", SpvOpUDiv, div, FILTER_ZERO, RANGE_FULL, nullptr)
+    CREATE_I_8136("rem", SpvOpSRem, rem, FILTER_NEGATIVES_AND_ZERO, RANGE_FULL, nullptr)
+    CREATE_I_8136("mod", SpvOpSMod, mod, FILTER_NEGATIVES_AND_ZERO, RANGE_FULL, nullptr)
+    CREATE_U_8136("mod", SpvOpUMod, mod, FILTER_ZERO, RANGE_FULL, nullptr)
+    CREATE_I_8136("abs", GLSLstd450SAbs, abs, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_8136("sign", GLSLstd450SSign, sign, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_8136("min", GLSLstd450SMin, min, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_U_8136("min", GLSLstd450UMin, min, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_8136("max", GLSLstd450SMax, max, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_U_8136("max", GLSLstd450UMax, max, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_8136("clamp", GLSLstd450SClamp, clamp, FILTER_MIN_GT_MAX, RANGE_FULL, "GLSL.std.450")
+    CREATE_U_8136("clamp", GLSLstd450UClamp, clamp, FILTER_MIN_GT_MAX, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_3("find_lsb", GLSLstd450FindILsb, lsb, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_3("find_msb", GLSLstd450FindSMsb, msb, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_U_3("find_msb", GLSLstd450FindUMsb, msb, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
+    CREATE_I_1("mul_sdiv", 0, mul_div, FILTER_ZERO, RANGE_FULL, nullptr)
+    CREATE_U_1("mul_udiv", 0, mul_div, FILTER_ZERO, RANGE_FULL, nullptr)
+
+    CREATE_U_8136_W("shift_right_logical", SpvOpShiftRightLogical, lsr, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
+    CREATE_I_8136_W("shift_right_logical", SpvOpShiftRightLogical, lsr, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
+    CREATE_U_8136_W("shift_right_arithmetic", SpvOpShiftRightArithmetic, asr, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
+    CREATE_I_8136_W("shift_right_arithmetic", SpvOpShiftRightArithmetic, asr, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
+    CREATE_U_8136_W("shift_left_logical", SpvOpShiftLeftLogical, lsl, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
+    CREATE_I_8136_W("shift_left_logical", SpvOpShiftLeftLogical, lsl, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
+
+    CREATE_U_8136("bitwise_or", SpvOpBitwiseOr, bitwise_or, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("bitwise_or", SpvOpBitwiseOr, bitwise_or, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136("bitwise_xor", SpvOpBitwiseXor, bitwise_xor, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("bitwise_xor", SpvOpBitwiseXor, bitwise_xor, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136("bitwise_and", SpvOpBitwiseAnd, bitwise_and, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("bitwise_and", SpvOpBitwiseAnd, bitwise_and, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136("not", SpvOpNot, not, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("not", SpvOpNot, not, FILTER_NONE, RANGE_FULL, nullptr)
+
+    CREATE_U_8136_N("iequal", SpvOpIEqual, iequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("iequal", SpvOpIEqual, iequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("inotequal", SpvOpINotEqual, inotequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("inotequal", SpvOpINotEqual, inotequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("ugreaterthan", SpvOpUGreaterThan, ugreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("ugreaterthan", SpvOpUGreaterThan, ugreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("sgreaterthan", SpvOpSGreaterThan, sgreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("sgreaterthan", SpvOpSGreaterThan, sgreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("ugreaterthanequal", SpvOpUGreaterThanEqual, ugreaterthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("ugreaterthanequal", SpvOpUGreaterThanEqual, ugreaterthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("sgreaterthanequal", SpvOpSGreaterThanEqual, sgreaterthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("sgreaterthanequal", SpvOpSGreaterThanEqual, sgreaterthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("ulessthan", SpvOpULessThan, ulessthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("ulessthan", SpvOpULessThan, ulessthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("slessthan", SpvOpSLessThan, slessthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("slessthan", SpvOpSLessThan, slessthan, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("ulessthanequal", SpvOpULessThanEqual, ulessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("ulessthanequal", SpvOpULessThanEqual, ulessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("slessthanequal", SpvOpSLessThanEqual, slessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("slessthanequal", SpvOpSLessThanEqual, slessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
+
+#ifndef CTS_USES_VULKANSC
+    // Bit field operations only apply to the first 4 vec sizes (scalar through vec4)
+    if (vecSizeIdx < 4)
+    {
+        CREATE_U_8136_WN("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
+                         nullptr)
+        CREATE_I_8136_WN("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
+                         nullptr)
+        CREATE_U_8136_WN("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE,
+                         RANGE_BIT_WIDTH_SUM, nullptr)
+        CREATE_I_8136_WN("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE,
+                         RANGE_BIT_WIDTH_SUM, nullptr)
+        CREATE_U_8136_WN("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE,
+                         RANGE_BIT_WIDTH_SUM, nullptr)
+        CREATE_I_8136_WN("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE,
+                         RANGE_BIT_WIDTH_SUM, nullptr)
+    }
+    CREATE_U_8136_N("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_8136_N("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136_N("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
+#else
+    CREATE_U_3_W("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM, nullptr)
+    CREATE_I_3_W("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM, nullptr)
+    CREATE_U_3_W("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
+                 nullptr)
+    CREATE_I_3_W("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
+                 nullptr)
+    CREATE_U_3_W("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
+                 nullptr)
+    CREATE_I_3_W("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
+                 nullptr)
+    CREATE_U_3("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_3("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_U_3("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_3("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
+#endif
+
+    if (isScalar)
+    {
+        CREATE_U_8136("constant", SpvOpConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
+        CREATE_I_8136("constant", SpvOpConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
+    }
+    else
+    {
+        CREATE_U_163264("constant_composite", SpvOpConstantComposite, constant, FILTER_NONE, RANGE_FULL, nullptr)
+        CREATE_I_8136("constant_composite", SpvOpConstantComposite, constant, FILTER_NONE, RANGE_FULL, nullptr)
+        CREATE_U_163264("constant_null", SpvOpConstantNull, constant, FILTER_NONE, RANGE_FULL, nullptr)
+        CREATE_I_8136("constant_null", SpvOpConstantNull, constant, FILTER_NONE, RANGE_FULL, nullptr)
+    }
+    CREATE_U_8136("variable_initializer", SpvOpVariable, constant, FILTER_NONE, RANGE_FULL, nullptr)
+    CREATE_I_8136("variable_initializer", SpvOpVariable, constant, FILTER_NONE, RANGE_FULL, nullptr)
+    if (isScalar)
+    {
+        CREATE_U_8136("spec_constant_initializer", SpvOpSpecConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
+        CREATE_I_8136("spec_constant_initializer", SpvOpSpecConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
+    }
+    else
+    {
+        CREATE_U_163264("spec_constant_composite_initializer", SpvOpSpecConstantComposite, constant, FILTER_NONE,
+                        RANGE_FULL, nullptr)
+        CREATE_I_8136("spec_constant_composite_initializer", SpvOpSpecConstantComposite, constant, FILTER_NONE,
+                      RANGE_FULL, nullptr)
+    }
+
+    if (isScalar)
+    {
+        int8Tests->createSwitchTests();
+        int16Tests->createSwitchTests();
+        int32Tests->createSwitchTests();
+        int64Tests->createSwitchTests();
+        uint8Tests->createSwitchTests();
+        uint16Tests->createSwitchTests();
+        uint32Tests->createSwitchTests();
+        uint64Tests->createSwitchTests();
+    }
+
+    group->addChild(int8Tests.release());
+    group->addChild(int16Tests.release());
+    group->addChild(int32Tests.release());
+    group->addChild(int64Tests.release());
+    group->addChild(uint8Tests.release());
+    group->addChild(uint16Tests.release());
+    group->addChild(uint32Tests.release());
+    group->addChild(uint64Tests.release());
+}
+
+void populateTypeTests(tcu::TestCaseGroup *typeTests)
+{
+    addTestGroup(typeTests, "scalar", populateSingleVecSizeTests, (uint32_t)VEC_SIZE_SCALAR);
+    for (uint32_t ndx = 1; ndx < numVectorSizes; ++ndx)
+    {
+        VecSize vectorSize   = (VecSize)ndx;
+        std::string testName = "vec" + de::toString(vecSizeNumElements[vectorSize]);
+        addTestGroup(typeTests, testName, populateSingleVecSizeTests, ndx);
+    }
+}
 
 tcu::TestCaseGroup *createTypeTests(tcu::TestContext &testCtx)
 {
-    de::MovePtr<tcu::TestCaseGroup> typeTests(new tcu::TestCaseGroup(testCtx, "type"));
-    de::MovePtr<tcu::TestCaseGroup> typeScalarTests(new tcu::TestCaseGroup(testCtx, "scalar"));
-    de::MovePtr<tcu::TestCaseGroup> typeVectorTests[3];
-
-    de::MovePtr<SpvAsmTypeInt8Tests> int8Tests[4];
-    de::MovePtr<SpvAsmTypeInt16Tests> int16Tests[4];
-    de::MovePtr<SpvAsmTypeInt32Tests> int32Tests[4];
-    de::MovePtr<SpvAsmTypeInt64Tests> int64Tests[4];
-    de::MovePtr<SpvAsmTypeUint8Tests> uint8Tests[4];
-    de::MovePtr<SpvAsmTypeUint16Tests> uint16Tests[4];
-    de::MovePtr<SpvAsmTypeUint32Tests> uint32Tests[4];
-    de::MovePtr<SpvAsmTypeUint64Tests> uint64Tests[4];
-
-    for (uint32_t ndx = 0; ndx < 3; ++ndx)
-    {
-        std::string testName = "vec" + de::toString(ndx + 2);
-        typeVectorTests[ndx] = de::MovePtr<tcu::TestCaseGroup>(new tcu::TestCaseGroup(testCtx, testName.c_str()));
-    }
-
-    for (uint32_t ndx = 0; ndx < 4; ++ndx)
-    {
-        int8Tests[ndx]   = de::MovePtr<SpvAsmTypeInt8Tests>(new SpvAsmTypeInt8Tests(testCtx, ndx + 1));
-        int16Tests[ndx]  = de::MovePtr<SpvAsmTypeInt16Tests>(new SpvAsmTypeInt16Tests(testCtx, ndx + 1));
-        int32Tests[ndx]  = de::MovePtr<SpvAsmTypeInt32Tests>(new SpvAsmTypeInt32Tests(testCtx, ndx + 1));
-        int64Tests[ndx]  = de::MovePtr<SpvAsmTypeInt64Tests>(new SpvAsmTypeInt64Tests(testCtx, ndx + 1));
-        uint8Tests[ndx]  = de::MovePtr<SpvAsmTypeUint8Tests>(new SpvAsmTypeUint8Tests(testCtx, ndx + 1));
-        uint16Tests[ndx] = de::MovePtr<SpvAsmTypeUint16Tests>(new SpvAsmTypeUint16Tests(testCtx, ndx + 1));
-        uint32Tests[ndx] = de::MovePtr<SpvAsmTypeUint32Tests>(new SpvAsmTypeUint32Tests(testCtx, ndx + 1));
-        uint64Tests[ndx] = de::MovePtr<SpvAsmTypeUint64Tests>(new SpvAsmTypeUint64Tests(testCtx, ndx + 1));
-    }
-
-    MAKE_TEST_SV_I_8136("negate", SpvOpSNegate, negate, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("add", SpvOpIAdd, add, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("sub", SpvOpISub, sub, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("mul", SpvOpIMul, mul, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("div", SpvOpSDiv, div, FILTER_ZERO, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136("div", SpvOpUDiv, div, FILTER_ZERO, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("rem", SpvOpSRem, rem, FILTER_NEGATIVES_AND_ZERO, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("mod", SpvOpSMod, mod, FILTER_NEGATIVES_AND_ZERO, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136("mod", SpvOpUMod, mod, FILTER_ZERO, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("abs", GLSLstd450SAbs, abs, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_8136("sign", GLSLstd450SSign, sign, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_8136("min", GLSLstd450SMin, min, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_U_8136("min", GLSLstd450UMin, min, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_8136("max", GLSLstd450SMax, max, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_U_8136("max", GLSLstd450UMax, max, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_8136("clamp", GLSLstd450SClamp, clamp, FILTER_MIN_GT_MAX, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_U_8136("clamp", GLSLstd450UClamp, clamp, FILTER_MIN_GT_MAX, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_3("find_lsb", GLSLstd450FindILsb, lsb, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_3("find_msb", GLSLstd450FindSMsb, msb, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_U_3("find_msb", GLSLstd450FindUMsb, msb, FILTER_NONE, RANGE_FULL, "GLSL.std.450")
-    MAKE_TEST_SV_I_1("mul_sdiv", 0, mul_div, FILTER_ZERO, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_1("mul_udiv", 0, mul_div, FILTER_ZERO, RANGE_FULL, nullptr)
-
-    MAKE_TEST_SV_U_8136_W("shift_right_logical", SpvOpShiftRightLogical, lsr, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
-    MAKE_TEST_SV_I_8136_W("shift_right_logical", SpvOpShiftRightLogical, lsr, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
-    MAKE_TEST_SV_U_8136_W("shift_right_arithmetic", SpvOpShiftRightArithmetic, asr, FILTER_NONE, RANGE_BIT_WIDTH,
-                          nullptr)
-    MAKE_TEST_SV_I_8136_W("shift_right_arithmetic", SpvOpShiftRightArithmetic, asr, FILTER_NONE, RANGE_BIT_WIDTH,
-                          nullptr)
-    MAKE_TEST_SV_U_8136_W("shift_left_logical", SpvOpShiftLeftLogical, lsl, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
-    MAKE_TEST_SV_I_8136_W("shift_left_logical", SpvOpShiftLeftLogical, lsl, FILTER_NONE, RANGE_BIT_WIDTH, nullptr)
-
-    MAKE_TEST_SV_U_8136("bitwise_or", SpvOpBitwiseOr, bitwise_or, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("bitwise_or", SpvOpBitwiseOr, bitwise_or, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136("bitwise_xor", SpvOpBitwiseXor, bitwise_xor, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("bitwise_xor", SpvOpBitwiseXor, bitwise_xor, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136("bitwise_and", SpvOpBitwiseAnd, bitwise_and, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("bitwise_and", SpvOpBitwiseAnd, bitwise_and, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136("not", SpvOpNot, not, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("not", SpvOpNot, not, FILTER_NONE, RANGE_FULL, nullptr)
-
-    MAKE_TEST_SV_U_8136_N("iequal", SpvOpIEqual, iequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("iequal", SpvOpIEqual, iequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("inotequal", SpvOpINotEqual, inotequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("inotequal", SpvOpINotEqual, inotequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("ugreaterthan", SpvOpUGreaterThan, ugreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("ugreaterthan", SpvOpUGreaterThan, ugreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("sgreaterthan", SpvOpSGreaterThan, sgreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("sgreaterthan", SpvOpSGreaterThan, sgreaterthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("ugreaterthanequal", SpvOpUGreaterThanEqual, ugreaterthanequal, FILTER_NONE, RANGE_FULL,
-                          nullptr)
-    MAKE_TEST_SV_I_8136_N("ugreaterthanequal", SpvOpUGreaterThanEqual, ugreaterthanequal, FILTER_NONE, RANGE_FULL,
-                          nullptr)
-    MAKE_TEST_SV_U_8136_N("sgreaterthanequal", SpvOpSGreaterThanEqual, sgreaterthanequal, FILTER_NONE, RANGE_FULL,
-                          nullptr)
-    MAKE_TEST_SV_I_8136_N("sgreaterthanequal", SpvOpSGreaterThanEqual, sgreaterthanequal, FILTER_NONE, RANGE_FULL,
-                          nullptr)
-    MAKE_TEST_SV_U_8136_N("ulessthan", SpvOpULessThan, ulessthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("ulessthan", SpvOpULessThan, ulessthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("slessthan", SpvOpSLessThan, slessthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("slessthan", SpvOpSLessThan, slessthan, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("ulessthanequal", SpvOpULessThanEqual, ulessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("ulessthanequal", SpvOpULessThanEqual, ulessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("slessthanequal", SpvOpSLessThanEqual, slessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("slessthanequal", SpvOpSLessThanEqual, slessthanequal, FILTER_NONE, RANGE_FULL, nullptr)
-
-#ifndef CTS_USES_VULKANSC
-    MAKE_TEST_SV_U_8136_WN("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                           nullptr)
-    MAKE_TEST_SV_I_8136_WN("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                           nullptr)
-    MAKE_TEST_SV_U_8136_WN("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE,
-                           RANGE_BIT_WIDTH_SUM, nullptr)
-    MAKE_TEST_SV_I_8136_WN("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE,
-                           RANGE_BIT_WIDTH_SUM, nullptr)
-    MAKE_TEST_SV_U_8136_WN("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE,
-                           RANGE_BIT_WIDTH_SUM, nullptr)
-    MAKE_TEST_SV_I_8136_WN("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE,
-                           RANGE_BIT_WIDTH_SUM, nullptr)
-    MAKE_TEST_SV_U_8136_N("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136_N("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136_N("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
-#else
-    MAKE_TEST_SV_U_3_W("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                       nullptr)
-    MAKE_TEST_SV_I_3_W("bit_field_insert", SpvOpBitFieldInsert, bitFieldInsert, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                       nullptr)
-    MAKE_TEST_SV_U_3_W("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                       nullptr)
-    MAKE_TEST_SV_I_3_W("bit_field_s_extract", SpvOpBitFieldSExtract, bitFieldSExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                       nullptr)
-    MAKE_TEST_SV_U_3_W("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                       nullptr)
-    MAKE_TEST_SV_I_3_W("bit_field_u_extract", SpvOpBitFieldUExtract, bitFieldUExtract, FILTER_NONE, RANGE_BIT_WIDTH_SUM,
-                       nullptr)
-    MAKE_TEST_SV_U_3("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_3("bit_reverse", SpvOpBitReverse, bitReverse, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_3("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_3("bit_count", SpvOpBitCount, bitCount, FILTER_NONE, RANGE_FULL, nullptr)
-#endif
-
-    MAKE_TEST_S_U_8136("constant", SpvOpConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_S_I_8136("constant", SpvOpConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_V_U_8136("constant_composite", SpvOpConstantComposite, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_V_I_8136("constant_composite", SpvOpConstantComposite, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_V_U_8136("constant_null", SpvOpConstantNull, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_V_I_8136("constant_null", SpvOpConstantNull, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_U_8136("variable_initializer", SpvOpVariable, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_SV_I_8136("variable_initializer", SpvOpVariable, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_S_U_8136("spec_constant_initializer", SpvOpSpecConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_S_I_8136("spec_constant_initializer", SpvOpSpecConstant, constant, FILTER_NONE, RANGE_FULL, nullptr)
-    MAKE_TEST_V_U_8136("spec_constant_composite_initializer", SpvOpSpecConstantComposite, constant, FILTER_NONE,
-                       RANGE_FULL, nullptr)
-    MAKE_TEST_V_I_8136("spec_constant_composite_initializer", SpvOpSpecConstantComposite, constant, FILTER_NONE,
-                       RANGE_FULL, nullptr)
-
-    int8Tests[0]->createSwitchTests();
-    int16Tests[0]->createSwitchTests();
-    int32Tests[0]->createSwitchTests();
-    int64Tests[0]->createSwitchTests();
-    uint8Tests[0]->createSwitchTests();
-    uint16Tests[0]->createSwitchTests();
-    uint32Tests[0]->createSwitchTests();
-    uint64Tests[0]->createSwitchTests();
-
-    typeScalarTests->addChild(int8Tests[0].release());
-    typeScalarTests->addChild(int16Tests[0].release());
-    typeScalarTests->addChild(int32Tests[0].release());
-    typeScalarTests->addChild(int64Tests[0].release());
-    typeScalarTests->addChild(uint8Tests[0].release());
-    typeScalarTests->addChild(uint16Tests[0].release());
-    typeScalarTests->addChild(uint32Tests[0].release());
-    typeScalarTests->addChild(uint64Tests[0].release());
-
-    typeTests->addChild(typeScalarTests.release());
-
-    for (uint32_t ndx = 0; ndx < 3; ++ndx)
-    {
-        typeVectorTests[ndx]->addChild(int8Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(int16Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(int32Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(int64Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(uint8Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(uint16Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(uint32Tests[ndx + 1].release());
-        typeVectorTests[ndx]->addChild(uint64Tests[ndx + 1].release());
-
-        typeTests->addChild(typeVectorTests[ndx].release());
-    }
-
-    return typeTests.release();
+    return createTestGroup(testCtx, "type", populateTypeTests);
 }
 
 } // namespace SpirVAssembly

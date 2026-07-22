@@ -21,6 +21,8 @@ set(DEQP_VK_VKSC_MEMORY_SRCS
 	vktMemoryBindingTests.hpp
 	vktMemoryExternalMemoryHostTests.cpp
 	vktMemoryExternalMemoryHostTests.hpp
+	vktMemoryOpaqueAndDmaImageTests.cpp
+	vktMemoryOpaqueAndDmaImageTests.hpp
 	)
 
 set(DEQP_VK_MEMORY_SRCS
@@ -36,6 +38,10 @@ set(DEQP_VK_MEMORY_SRCS
 	vktMemoryDecompressionTests.hpp
 	vktMemoryZeroInitializeDeviceMemoryTests.cpp
 	vktMemoryZeroInitializeDeviceMemoryTests.hpp
+	vktMemoryExternalDmaHeapTests.cpp
+	vktMemoryExternalDmaHeapTests.hpp
+	vktMemoryMapPlacedTests.cpp
+	vktMemoryMapPlacedTests.hpp
 	)
 
 PCH(DEQP_VK_MEMORY_SRCS ../pch.cpp)

@@ -23,6 +23,7 @@
  *//*--------------------------------------------------------------------*/
 
 #include "vktRenderPassCustomResolveTests.hpp"
+#include "vktTestCaseUtil.hpp"
 
 #include "vkBarrierUtil.hpp"
 #include "vkBufferWithMemory.hpp"
@@ -618,7 +619,7 @@ void CustomResolveCase::checkSupport(Context &context) const
 
     for (const auto &att : m_params.attachmentList)
     {
-        if (!att.usedInResolvePipeline || !att.usedInResolvePipeline)
+        if (!att.usedInResolvePipeline || !att.usedInResolveRendering)
             unusedAttachments = true;
 
         const auto formats = att.getFormats();
@@ -2060,7 +2061,7 @@ tcu::TestStatus CustomResolveInstance::iterate(void)
                         resolveImageView,
                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                         VK_ATTACHMENT_LOAD_OP_LOAD,
-                        VK_ATTACHMENT_STORE_OP_STORE,
+                        VK_ATTACHMENT_STORE_OP_DONT_CARE,
                         makeClearValueColor(tcu::Vec4(0.0f)),
                     });
                     colorRenderingAttachmentFormats.push_back(attInfo.attachmentFormat);
@@ -2088,7 +2089,7 @@ tcu::TestStatus CustomResolveInstance::iterate(void)
                         ((isUsed && usedInResolve) ? resolveViews.at(attIndex)->get() : VK_NULL_HANDLE),
                         (isUsed ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED),
                         VK_ATTACHMENT_LOAD_OP_LOAD,
-                        VK_ATTACHMENT_STORE_OP_STORE,
+                        VK_ATTACHMENT_STORE_OP_DONT_CARE,
                         makeClearValueColor(tcu::Vec4(0.0f)),
                     });
                     colorRenderingAttachmentFormats.push_back((isUsed && usedInResolve) ? attInfoPtr->attachmentFormat :
@@ -2107,7 +2108,7 @@ tcu::TestStatus CustomResolveInstance::iterate(void)
                     resolveViews.at(depthStencilAttIndexAspects->index)->get(),
                     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     VK_ATTACHMENT_LOAD_OP_LOAD,
-                    VK_ATTACHMENT_STORE_OP_STORE,
+                    VK_ATTACHMENT_STORE_OP_DONT_CARE,
                     makeClearValueDepthStencil(0.0f, 0u), // Not used.
                 };
 
@@ -4294,6 +4295,8 @@ struct FDMParams
     bool multiView;
     bool fillCustomResolveFragOutOnly;   // In the fill pipeline, only include custom resolve info in frag out.
     bool emptyCustomResolveInFragShader; // In the frag shader state of the resolve pipeline, omit format info.
+    bool largeFramebuffer;               // Use a larger-than-usual framebuffer.
+    bool useOffset;                      // Use VK_EXT_fragment_density_map_offset.
 
     bool useDynamicRendering() const
     {
@@ -4302,7 +4305,8 @@ struct FDMParams
 
     tcu::IVec3 getExtent() const
     {
-        return tcu::IVec3(256, 256, (multiLayer || multiView ? 2 : 1));
+        const int baseDim = (largeFramebuffer ? 1024 : 256);
+        return tcu::IVec3(baseDim, baseDim, (multiLayer || multiView ? 2 : 1));
     }
 };
 
@@ -4361,6 +4365,7 @@ void FDMCase::initDeviceCapabilities(DevCaps &caps)
     caps.addExtension("VK_KHR_dynamic_rendering_local_read");
     caps.addExtension("VK_EXT_fragment_density_map");
     caps.addExtension("VK_EXT_fragment_density_map2");
+    caps.addExtension("VK_EXT_fragment_density_map_offset");
     caps.addExtension("VK_EXT_custom_resolve");
     caps.addExtension("VK_EXT_shader_object");
     caps.addExtension("VK_EXT_graphics_pipeline_library");
@@ -4369,6 +4374,7 @@ void FDMCase::initDeviceCapabilities(DevCaps &caps)
 
     caps.addFeature<VkPhysicalDeviceFragmentDensityMapFeaturesEXT>();
     caps.addFeature<VkPhysicalDeviceFragmentDensityMap2FeaturesEXT>();
+    caps.addFeature<VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT>();
     caps.addFeature<VkPhysicalDeviceDynamicRenderingLocalReadFeatures>();
     caps.addFeature<VkPhysicalDeviceDynamicRenderingFeatures>();
     caps.addFeature<VkPhysicalDeviceCustomResolveFeaturesEXT>();
@@ -4386,13 +4392,26 @@ void FDMCase::checkSupport(Context &context) const
     // device.
     context.requireDeviceFunctionality("VK_EXT_fragment_density_map");
     context.requireInstanceFunctionality("VK_KHR_get_physical_device_properties2");
+    if (m_params.useOffset)
+        context.requireDeviceFunctionality("VK_EXT_fragment_density_map_offset");
+
     const auto ctx = context.getContextCommonData();
 
-    VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdmFeatures = initVulkanStructure();
-    VkPhysicalDeviceFeatures2 features2                       = initVulkanStructure(&fdmFeatures);
+    VkPhysicalDeviceFragmentDensityMapFeaturesEXT fdmFeatures             = initVulkanStructure();
+    VkPhysicalDeviceFragmentDensityMapOffsetFeaturesEXT fdmOffsetFeatures = initVulkanStructure();
+    VkPhysicalDeviceFeatures2 features2                                   = initVulkanStructure();
+
+    const auto addFeatures = makeStructChainAdder(&features2);
+    addFeatures(&fdmFeatures);
+    if (m_params.useOffset)
+        addFeatures(&fdmOffsetFeatures);
+
     ctx.vki.getPhysicalDeviceFeatures2(ctx.physicalDevice, &features2);
     if (!fdmFeatures.fragmentDensityMap)
         TCU_THROW(NotSupportedError, "fragmentDensityMap not supported");
+
+    if (m_params.useOffset && !fdmOffsetFeatures.fragmentDensityMapOffset)
+        TCU_THROW(NotSupportedError, "fragmentDensityMapOffset not supported");
 
     const auto &crFeatures = context.getCustomResolveFeaturesEXT();
     if (!crFeatures.customResolve)
@@ -4419,8 +4438,9 @@ void FDMCase::checkSupport(Context &context) const
     }
     else
     {
-        // We're not going to bother with render pass 2 for these tests.
-        DE_ASSERT(m_params.groupParams->renderingType == RENDERING_TYPE_RENDERPASS_LEGACY);
+        // We're not going to bother with legacy render passes for these tests.
+        DE_ASSERT(m_params.groupParams->renderingType == RENDERING_TYPE_RENDERPASS2);
+        context.requireDeviceFunctionality("VK_KHR_create_renderpass2");
     }
 
     // We always need Vulkan 1.2 and shaderOutputLayer due to the fragment copy shader.
@@ -4568,21 +4588,88 @@ void FDMCase::initPrograms(vk::SourceCollections &programCollection) const
         const auto descType = (isArray ? "sampler2DArray" : "sampler2D");
         const auto fragCoordNorm =
             "(gl_FragCoord.xy / vec2(" + std::to_string(extent.x()) + ", " + std::to_string(extent.y()) + "))";
-        const auto layerNorm = "(float(gl_Layer) / float(" + std::to_string(extent.z()) + "))";
-        const auto coords    = (isArray ? "vec3(" + fragCoordNorm + ", " + layerNorm + ")" : fragCoordNorm);
+        const auto layerCoord = "float(gl_Layer)";
+        const auto coords     = (isArray ? "vec3(" + fragCoordNorm + ", " + layerCoord + ")" : fragCoordNorm);
 
         std::ostringstream frag;
         frag << "#version 460\n"
-             << "layout (set=0, binding=0) uniform " << descType << " inColor0;\n"
-             << "layout (set=0, binding=1) uniform " << descType << " inColor1;\n"
-             << "layout (location=0) out vec4 outColor0;\n"
-             << "layout (location=1) out vec4 outColor1;\n"
+             << "layout (set=0, binding=0) uniform " << descType << " inColor;\n"
+             << "layout (location=0) out vec4 outColor;\n"
              << "void main(void) {\n"
-             << "    outColor0 = texture(inColor0, " << coords << ", 0);\n"
-             << "    outColor1 = texture(inColor1, " << coords << ", 0);\n"
+             << "    outColor = texture(inColor, " << coords << ", 0);\n"
              << "}\n";
         programCollection.glslSources.add("frag-copy") << glu::FragmentSource(frag.str()) << spvOpts;
     }
+}
+
+VkAttachmentDescription2 makeAttachmentDescription2(VkAttachmentDescriptionFlags flags, VkFormat format,
+                                                    VkSampleCountFlagBits samples, VkAttachmentLoadOp loadOp,
+                                                    VkAttachmentStoreOp storeOp, VkAttachmentLoadOp stencilLoadOp,
+                                                    VkAttachmentStoreOp stencilStoreOp, VkImageLayout initialLayout,
+                                                    VkImageLayout finalLayout)
+{
+    VkAttachmentDescription2 res = initVulkanStructure();
+    res.flags                    = flags;
+    res.format                   = format;
+    res.samples                  = samples;
+    res.loadOp                   = loadOp;
+    res.storeOp                  = storeOp;
+    res.stencilLoadOp            = stencilLoadOp;
+    res.stencilStoreOp           = stencilStoreOp;
+    res.initialLayout            = initialLayout;
+    res.finalLayout              = finalLayout;
+    return res;
+}
+
+VkAttachmentReference2 makeAttachmentReference2(uint32_t attachment, VkImageLayout layout,
+                                                VkImageAspectFlags inputAttAspects)
+{
+    VkAttachmentReference2 res = initVulkanStructure();
+    res.attachment             = attachment;
+    res.layout                 = layout;
+    res.aspectMask             = inputAttAspects;
+    return res;
+}
+
+VkSubpassDescription2 makeSubpassDescription2(VkSubpassDescriptionFlags flags, VkPipelineBindPoint pipelineBindPoint,
+                                              uint32_t viewMask, uint32_t inputAttachmentCount,
+                                              const VkAttachmentReference2 *pInputAttachments,
+                                              uint32_t colorAttachmentCount,
+                                              const VkAttachmentReference2 *pColorAttachments,
+                                              const VkAttachmentReference2 *pResolveAttachments,
+                                              const VkAttachmentReference2 *pDepthStencilAttachment,
+                                              uint32_t preserveAttachmentCount, const uint32_t *pPreserveAttachments)
+{
+    VkSubpassDescription2 res   = initVulkanStructure();
+    res.flags                   = flags;
+    res.pipelineBindPoint       = pipelineBindPoint;
+    res.viewMask                = viewMask;
+    res.inputAttachmentCount    = inputAttachmentCount;
+    res.pInputAttachments       = pInputAttachments;
+    res.colorAttachmentCount    = colorAttachmentCount;
+    res.pColorAttachments       = pColorAttachments;
+    res.pResolveAttachments     = pResolveAttachments;
+    res.pDepthStencilAttachment = pDepthStencilAttachment;
+    res.preserveAttachmentCount = preserveAttachmentCount;
+    res.pPreserveAttachments    = pPreserveAttachments;
+    return res;
+}
+
+VkSubpassDependency2 makeSubpassDependency2(uint32_t srcSubpass, uint32_t dstSubpass, VkPipelineStageFlags srcStageMask,
+                                            VkPipelineStageFlags dstStageMask, VkAccessFlags srcAccessMask,
+                                            VkAccessFlags dstAccessMask, VkDependencyFlags dependencyFlags,
+                                            int32_t viewOffset)
+{
+    VkSubpassDependency2 res = initVulkanStructure();
+    res.srcSubpass           = srcSubpass;
+    res.dstSubpass           = dstSubpass;
+    res.srcStageMask         = srcStageMask;
+    res.dstStageMask         = dstStageMask;
+    res.srcAccessMask        = srcAccessMask;
+    res.dstAccessMask        = dstAccessMask;
+    res.dependencyFlags      = dependencyFlags;
+    res.viewOffset           = viewOffset;
+    return res;
 }
 
 tcu::TestStatus FDMInstance::iterate(void)
@@ -4605,13 +4692,14 @@ tcu::TestStatus FDMInstance::iterate(void)
     const auto dsSRR =
         makeImageSubresourceRange((VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT), 0u, 1u, 0u, layerCount);
 
-    const auto fdmFormat      = VK_FORMAT_R8G8_UNORM;
-    const auto colorFormat    = VK_FORMAT_R8G8B8A8_UNORM;
-    const auto imageType      = VK_IMAGE_TYPE_2D;
-    const auto imageTiling    = VK_IMAGE_TILING_OPTIMAL;
-    const auto sharingMode    = VK_SHARING_MODE_EXCLUSIVE;
-    const auto msColorUsage   = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
-    const auto ssColorUsage   = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    const auto fdmFormat    = VK_FORMAT_R8G8_UNORM;
+    const auto colorFormat  = VK_FORMAT_R8G8B8A8_UNORM;
+    const auto imageType    = VK_IMAGE_TYPE_2D;
+    const auto imageTiling  = VK_IMAGE_TILING_OPTIMAL;
+    const auto sharingMode  = VK_SHARING_MODE_EXCLUSIVE;
+    const auto msColorUsage = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
+    const auto ssColorUsage =
+        (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     const auto copyColorUsage = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     const auto fdmUsage       = (VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     const auto bindPoint      = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -4619,6 +4707,8 @@ tcu::TestStatus FDMInstance::iterate(void)
     VkImageCreateFlags fbImageFlags = 0u;
     if (m_params.subsampledImages)
         fbImageFlags |= VK_IMAGE_CREATE_SUBSAMPLED_BIT_EXT;
+    if (m_params.useOffset)
+        fbImageFlags |= VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT;
 
     const VkImageCreateInfo msImageCreateInfo = {
         VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -4672,7 +4762,7 @@ tcu::TestStatus FDMInstance::iterate(void)
 
     auto dsImageCreateInfo   = msImageCreateInfo;
     dsImageCreateInfo.format = chosenDSFormat;
-    dsImageCreateInfo.usage  = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    dsImageCreateInfo.usage  = (VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
 
     ImageWithMemory dsBuffer(ctx.vkd, ctx.device, ctx.allocator, dsImageCreateInfo, MemoryRequirement::Any);
     const auto dsView = makeImageView(ctx.vkd, ctx.device, *dsBuffer, imageViewType, chosenDSFormat, dsSRR);
@@ -4706,10 +4796,14 @@ tcu::TestStatus FDMInstance::iterate(void)
     const auto fdmExtent   = extent2d / minTexelSize;
     const auto fdmExtentVk = makeExtent3D(fdmExtent);
 
+    VkImageCreateFlags fdmCreateFlags = 0u;
+    if (m_params.useOffset)
+        fdmCreateFlags |= VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT;
+
     const VkImageCreateInfo fdmCreateInfo = {
         VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         nullptr,
-        0u,
+        fdmCreateFlags,
         imageType,
         fdmFormat,
         fdmExtentVk,
@@ -4772,8 +4866,8 @@ tcu::TestStatus FDMInstance::iterate(void)
     const auto setLayout = setLayoutBuilder.build(ctx.vkd, ctx.device);
 
     DescriptorSetLayoutBuilder copySetLayoutBuilder;
-    copySetLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-    copySetLayoutBuilder.addSingleBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+    copySetLayoutBuilder.addSingleSamplerBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                                 VK_SHADER_STAGE_FRAGMENT_BIT, &sampler.get());
     const auto copySetLayout = copySetLayoutBuilder.build(ctx.vkd, ctx.device);
 
     PipelineLayoutWrapper pipelineLayout(m_params.groupParams->pipelineConstructionType, ctx.vkd, ctx.device,
@@ -4784,24 +4878,25 @@ tcu::TestStatus FDMInstance::iterate(void)
     // Descriptor pool and set.
     DescriptorPoolBuilder poolBuilder;
     poolBuilder.addType(VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
-    poolBuilder.addType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2);
+    poolBuilder.addType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2u);
     const auto descriptorPool =
-        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 2u);
-    const auto descriptorSet     = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *setLayout);
-    const auto copyDescriptorSet = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *copySetLayout);
+        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 3u);
+    const auto descriptorSet      = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *setLayout);
+    const auto copyDescriptorSet0 = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *copySetLayout);
+    const auto copyDescriptorSet1 = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *copySetLayout);
 
     // Update descriptor sets.
     DescriptorSetUpdateBuilder setUpdateBuilder;
     const auto binding    = DescriptorSetUpdateBuilder::Location::binding;
     const auto inputDesc0 = makeDescriptorImageInfo(VK_NULL_HANDLE, *colorView0, inputAttLayout);
     const auto samplerDesc0 =
-        makeDescriptorImageInfo(*sampler, *resolveView0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        makeDescriptorImageInfo(VK_NULL_HANDLE, *resolveView0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     const auto samplerDesc1 =
-        makeDescriptorImageInfo(*sampler, *resolveView1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        makeDescriptorImageInfo(VK_NULL_HANDLE, *resolveView1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     setUpdateBuilder.writeSingle(*descriptorSet, binding(0u), VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, &inputDesc0);
-    setUpdateBuilder.writeSingle(*copyDescriptorSet, binding(0u), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    setUpdateBuilder.writeSingle(*copyDescriptorSet0, binding(0u), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  &samplerDesc0);
-    setUpdateBuilder.writeSingle(*copyDescriptorSet, binding(1u), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    setUpdateBuilder.writeSingle(*copyDescriptorSet1, binding(0u), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  &samplerDesc1);
     setUpdateBuilder.update(ctx.vkd, ctx.device);
 
@@ -4811,7 +4906,8 @@ tcu::TestStatus FDMInstance::iterate(void)
 
     // For the texture copy pass.
     Move<VkRenderPass> renderPassCopy;
-    Move<VkFramebuffer> framebufferCopy;
+    Move<VkFramebuffer> framebufferCopy0;
+    Move<VkFramebuffer> framebufferCopy1;
 
     std::unique_ptr<VkCustomResolveCreateInfoEXT> fillCustomResolveCreateInfo;
     std::unique_ptr<VkCustomResolveCreateInfoEXT> resolveCustomResolveCreateInfo;
@@ -4822,9 +4918,7 @@ tcu::TestStatus FDMInstance::iterate(void)
 
     if (m_params.useDynamicRendering())
     {
-        drColorFormats.reserve(2u);
-        drColorFormats.push_back(colorFormat);
-        drColorFormats.push_back(colorFormat);
+        drColorFormats.resize(2u, colorFormat);
 
         fillCustomResolveCreateInfo.reset(new VkCustomResolveCreateInfoEXT);
         *fillCustomResolveCreateInfo = VkCustomResolveCreateInfoEXT{
@@ -4875,86 +4969,75 @@ tcu::TestStatus FDMInstance::iterate(void)
             VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
             nullptr,
             0u, // Never multiview.
-            de::sizeU32(drColorFormats),
-            de::dataOrNull(drColorFormats),
+            1u,
+            &colorFormat,
             VK_FORMAT_UNDEFINED,
             VK_FORMAT_UNDEFINED,
         };
     }
     else
     {
-        const std::vector<VkAttachmentDescription> attachmentDescriptions{
+        const std::vector<VkAttachmentDescription2> attachmentDescriptions{
             // 0: ms color attachment, 1: ms depth attachment, 2: ss color attachment, 3: fdm attachment, 4: second ms color attachment, 5: second ss color attachment
-            makeAttachmentDescription(0u, colorFormat, VK_SAMPLE_COUNT_4_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentDescription(0u, chosenDSFormat, VK_SAMPLE_COUNT_4_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
-            makeAttachmentDescription(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentDescription(
+            makeAttachmentDescription2(0u, colorFormat, VK_SAMPLE_COUNT_4_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+            makeAttachmentDescription2(0u, chosenDSFormat, VK_SAMPLE_COUNT_4_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            makeAttachmentDescription2(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+            makeAttachmentDescription2(
                 0u, fdmFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_DONT_CARE,
                 VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
                 VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT),
-            makeAttachmentDescription(0u, colorFormat, VK_SAMPLE_COUNT_4_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentDescription(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+            makeAttachmentDescription2(0u, colorFormat, VK_SAMPLE_COUNT_4_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+            makeAttachmentDescription2(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
         };
 
-        const std::vector<VkAttachmentReference> msColorAttRefs{
-            makeAttachmentReference(0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentReference(4u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+        const std::vector<VkAttachmentReference2> msColorAttRefs{
+            makeAttachmentReference2(0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0u),
+            makeAttachmentReference2(4u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0u),
         };
-        const std::vector<VkAttachmentReference> ssColorAttRefs{
-            makeAttachmentReference(2u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentReference(5u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+        const std::vector<VkAttachmentReference2> ssColorAttRefs{
+            makeAttachmentReference2(2u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0u),
+            makeAttachmentReference2(5u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0u),
         };
-        const auto msInputAttRef = makeAttachmentReference(0u, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        const auto dsAttRef      = makeAttachmentReference(1u, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        const auto msInputAttRef =
+            makeAttachmentReference2(0u, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+        const auto dsAttRef = makeAttachmentReference2(1u, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0u);
 
-        const std::vector<VkSubpassDescription> subpassDescriptions{
-            makeSubpassDescription(0u, bindPoint, 0u, nullptr, de::sizeU32(msColorAttRefs),
-                                   de::dataOrNull(msColorAttRefs), nullptr, &dsAttRef, 0u, nullptr),
-            makeSubpassDescription(VK_SUBPASS_DESCRIPTION_CUSTOM_RESOLVE_BIT_EXT, bindPoint, 1u, &msInputAttRef,
-                                   de::sizeU32(ssColorAttRefs), de::dataOrNull(ssColorAttRefs), nullptr, nullptr, 0u,
-                                   nullptr),
+        const std::vector<VkSubpassDescription2> subpassDescriptions{
+            makeSubpassDescription2(0u, bindPoint, viewMask, 0u, nullptr, de::sizeU32(msColorAttRefs),
+                                    de::dataOrNull(msColorAttRefs), nullptr, &dsAttRef, 0u, nullptr),
+            makeSubpassDescription2(VK_SUBPASS_DESCRIPTION_CUSTOM_RESOLVE_BIT_EXT, bindPoint, viewMask, 1u,
+                                    &msInputAttRef, de::sizeU32(ssColorAttRefs), de::dataOrNull(ssColorAttRefs),
+                                    nullptr, nullptr, 0u, nullptr),
         };
 
-        const std::vector<VkSubpassDependency> subpassDependencies{makeSubpassDependency(
+        const std::vector<VkSubpassDependency2> subpassDependencies{makeSubpassDependency2(
             0u, 1u, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
             (VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT),
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            (VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT), VK_DEPENDENCY_BY_REGION_BIT)};
-
-        const std::vector<uint32_t> multiviewMasks(subpassDescriptions.size(), viewMask);
-
-        VkRenderPassMultiviewCreateInfo multiviewCreateInfo = {
-            VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO,
-            nullptr,
-            de::sizeU32(multiviewMasks),
-            de::dataOrNull(multiviewMasks),
-            0u,
-            nullptr,
-            0u,
-            nullptr,
-        };
+            (VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT), VK_DEPENDENCY_BY_REGION_BIT,
+            0)};
 
         VkRenderPassFragmentDensityMapCreateInfoEXT rpFDMCreateInfo = {
             VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT, nullptr,
             makeAttachmentReference(3u, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT)};
 
-        VkRenderPassCreateInfo rpCreateInfo = {
-            VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        VkRenderPassCreateInfo2 rpCreateInfo = {
+            VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
             nullptr,
             0u,
             de::sizeU32(attachmentDescriptions),
@@ -4963,15 +5046,15 @@ tcu::TestStatus FDMInstance::iterate(void)
             de::dataOrNull(subpassDescriptions),
             de::sizeU32(subpassDependencies),
             de::dataOrNull(subpassDependencies),
+            0u,
+            nullptr,
         };
 
         // Add the needed extension structures.
         const auto addRenderPassInfo = makeStructChainAdder(&rpCreateInfo);
         addRenderPassInfo(&rpFDMCreateInfo);
-        if (m_params.multiView)
-            addRenderPassInfo(&multiviewCreateInfo);
 
-        renderPass = createRenderPass(ctx.vkd, ctx.device, &rpCreateInfo);
+        renderPass = createRenderPass2(ctx.vkd, ctx.device, &rpCreateInfo);
 
         const std::vector<VkImageView> fbViews{
             *colorView0, *dsView, *resolveView0, *fdmView, *colorView1, *resolveView1,
@@ -4980,24 +5063,19 @@ tcu::TestStatus FDMInstance::iterate(void)
         framebuffer = makeFramebuffer(ctx.vkd, ctx.device, *renderPass, de::sizeU32(fbViews), de::dataOrNull(fbViews),
                                       extentVk.width, extentVk.height, fbLayerCount);
 
-        const std::vector<VkAttachmentDescription> copyAttDescs{
-            makeAttachmentDescription(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                      VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentDescription(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                      VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                                      VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+        const std::vector<VkAttachmentDescription2> copyAttDescs{
+            makeAttachmentDescription2(0u, colorFormat, VK_SAMPLE_COUNT_1_BIT, VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                       VK_ATTACHMENT_STORE_OP_STORE, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                                       VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
         };
-        const std::vector<VkAttachmentReference> copyAttRefs{
-            makeAttachmentReference(0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
-            makeAttachmentReference(1u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL),
+        const std::vector<VkAttachmentReference2> copyAttRefs{
+            makeAttachmentReference2(0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0u),
         };
-        const auto copySubpass = makeSubpassDescription(0u, bindPoint, 0u, nullptr, de::sizeU32(copyAttRefs),
-                                                        de::dataOrNull(copyAttRefs), nullptr, nullptr, 0u, nullptr);
-        const VkRenderPassCreateInfo copyRPCreateInfo = {
-            VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        const auto copySubpass = makeSubpassDescription2(0u, bindPoint, 0u, 0u, nullptr, de::sizeU32(copyAttRefs),
+                                                         de::dataOrNull(copyAttRefs), nullptr, nullptr, 0u, nullptr);
+        const VkRenderPassCreateInfo2 copyRPCreateInfo = {
+            VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
             nullptr,
             0u,
             de::sizeU32(copyAttDescs),
@@ -5006,11 +5084,18 @@ tcu::TestStatus FDMInstance::iterate(void)
             &copySubpass,
             0u,
             nullptr,
+            0u,
+            nullptr,
         };
-        renderPassCopy = createRenderPass(ctx.vkd, ctx.device, &copyRPCreateInfo);
-        const std::vector<VkImageView> copyViews{*copyView0, *copyView1};
-        framebufferCopy = makeFramebuffer(ctx.vkd, ctx.device, *renderPassCopy, de::sizeU32(copyViews),
-                                          de::dataOrNull(copyViews), extentVk.width, extentVk.height, layerCount);
+        renderPassCopy = createRenderPass2(ctx.vkd, ctx.device, &copyRPCreateInfo);
+
+        const std::vector<VkImageView> copyViews0{*copyView0};
+        const std::vector<VkImageView> copyViews1{*copyView1};
+
+        framebufferCopy0 = makeFramebuffer(ctx.vkd, ctx.device, *renderPassCopy, de::sizeU32(copyViews0),
+                                           de::dataOrNull(copyViews0), extentVk.width, extentVk.height, layerCount);
+        framebufferCopy1 = makeFramebuffer(ctx.vkd, ctx.device, *renderPassCopy, de::sizeU32(copyViews1),
+                                           de::dataOrNull(copyViews1), extentVk.width, extentVk.height, layerCount);
     }
 
     const auto &binaries = m_context.getBinaryCollection();
@@ -5096,6 +5181,9 @@ tcu::TestStatus FDMInstance::iterate(void)
         {0.0f, 0.0f, 0.0f, 0.0f},
     };
 
+    auto copyColorBlendState            = colorBlendState;
+    copyColorBlendState.attachmentCount = 1u;
+
     GraphicsPipelineWrapper fillPipeline(ctx.vki, ctx.vkd, ctx.physicalDevice, ctx.device,
                                          m_context.getDeviceExtensions(),
                                          m_params.groupParams->pipelineConstructionType, pipelineCreateFlags);
@@ -5143,7 +5231,7 @@ tcu::TestStatus FDMInstance::iterate(void)
                                           copyPipelineRenderingCreateInfo.get())
         .setupFragmentShaderState(copyPipelineLayout, *renderPassCopy, 0u, fragCopyShader, &dsStateCreateInfoCopy,
                                   &multisampleStateCreateInfoCopy)
-        .setupFragmentOutputState(*renderPassCopy, 0u, &colorBlendState, &multisampleStateCreateInfoCopy)
+        .setupFragmentOutputState(*renderPassCopy, 0u, &copyColorBlendState, &multisampleStateCreateInfoCopy)
         .buildPipeline();
 
     CommandPoolWithBuffer cmd(ctx.vkd, ctx.device, ctx.qfIndex);
@@ -5159,9 +5247,8 @@ tcu::TestStatus FDMInstance::iterate(void)
     const auto vertexCount   = 4u; // For the full-screen triangle strip.
     const auto instanceCount = (m_params.multiLayer ? layerCount : 1u);
 
-    beginCommandBuffer(ctx.vkd, cmdBuffer);
-
-    // Fill FDM with the proper density values.
+    // Auxiliar function to fill the FDM with proper density values.
+    const auto fillFDM = [&](VkCommandBuffer fillCmdBuffer)
     {
         const auto densityValue =
             (0.5f - 1.0f / 255.0f); // The delta makes sure the implementation accepts density (2,2)
@@ -5169,20 +5256,48 @@ tcu::TestStatus FDMInstance::iterate(void)
 
         const auto preBarrier = makeImageMemoryBarrier(0u, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, *fdmBuffer, fdmSRR);
-        cmdPipelineImageMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        cmdPipelineImageMemoryBarrier(ctx.vkd, fillCmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                       VK_PIPELINE_STAGE_TRANSFER_BIT, &preBarrier);
 
-        ctx.vkd.cmdClearColorImage(cmdBuffer, *fdmBuffer, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &fdmClearValue.color,
-                                   1u, &fdmSRR);
+        ctx.vkd.cmdClearColorImage(fillCmdBuffer, *fdmBuffer, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   &fdmClearValue.color, 1u, &fdmSRR);
 
         const auto postBarrier = makeImageMemoryBarrier(
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_FRAGMENT_DENSITY_MAP_READ_BIT_EXT,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT, *fdmBuffer, fdmSRR);
-        cmdPipelineImageMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        cmdPipelineImageMemoryBarrier(ctx.vkd, fillCmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                       VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT, &postBarrier);
+    };
+
+    {
+        // Fill FDM and wait so the FDM can be read from the CPU if needed.
+        const auto fillCmd = allocateCommandBuffer(ctx.vkd, ctx.device, *cmd.cmdPool, VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+        beginCommandBuffer(ctx.vkd, *fillCmd);
+        fillFDM(*fillCmd);
+        endCommandBuffer(ctx.vkd, *fillCmd);
+        submitCommandsAndWait(ctx.vkd, ctx.device, ctx.queue, *fillCmd);
     }
 
+    beginCommandBuffer(ctx.vkd, cmdBuffer);
+
     VkImageLayout ssFinalLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkRenderPassFragmentDensityMapOffsetEndInfoEXT fdmOffsetEndInfo = initVulkanStructure();
+    std::vector<VkOffset2D> fdmOffsets;
+    const auto *pFdmOffsetEndInfo = (m_params.useOffset ? &fdmOffsetEndInfo : nullptr);
+
+    if (m_params.useOffset)
+    {
+        const auto fdmOffsetProperties = m_context.getFragmentDensityMapOffsetPropertiesEXT();
+        const tcu::IVec2 fdmOffsetGranularity(fdmOffsetProperties.fragmentDensityOffsetGranularity.width,
+                                              fdmOffsetProperties.fragmentDensityOffsetGranularity.height);
+        const auto signedGranularity = fdmOffsetGranularity.asInt();
+        const auto fdmOffset         = makeOffset2D(signedGranularity.x(), signedGranularity.y());
+        const auto fdmOffsetCount    = (m_params.multiView ? layerCount : 1u);
+        fdmOffsets.resize(fdmOffsetCount, fdmOffset);
+        fdmOffsetEndInfo.fragmentDensityOffsetCount = de::sizeU32(fdmOffsets);
+        fdmOffsetEndInfo.pFragmentDensityOffsets    = de::dataOrNull(fdmOffsets);
+    }
 
     if (m_params.useDynamicRendering())
     {
@@ -5287,22 +5402,48 @@ tcu::TestStatus FDMInstance::iterate(void)
         ctx.vkd.cmdPushConstants(cmdBuffer, *pipelineLayout, pcStages, 0u, pcSize, &pcValues);
         resolvePipeline.bind(cmdBuffer);
         ctx.vkd.cmdDraw(cmdBuffer, vertexCount, instanceCount, 0u, 0u);
-        ctx.vkd.cmdEndRendering(cmdBuffer);
+        if (m_params.useOffset)
+        {
+            const VkRenderingEndInfoKHR renderingEndInfo = initVulkanStructureConst(pFdmOffsetEndInfo);
+            ctx.vkd.cmdEndRendering2KHR(cmdBuffer, &renderingEndInfo);
+        }
+        else
+            ctx.vkd.cmdEndRendering(cmdBuffer);
     }
     else
     {
-        beginRenderPass(ctx.vkd, cmdBuffer, *renderPass, *framebuffer, scissors.front(), de::sizeU32(clearValues),
-                        de::dataOrNull(clearValues));
+        const VkRenderPassBeginInfo renderPassBeginInfo = {
+            VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            nullptr,
+            *renderPass,
+            *framebuffer,
+            scissors.front(),
+            de::sizeU32(clearValues),
+            de::dataOrNull(clearValues),
+        };
+
+        const VkSubpassBeginInfo subpassBeginInfo = {
+            VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO,
+            nullptr,
+            VK_SUBPASS_CONTENTS_INLINE,
+        };
+
+        const VkSubpassEndInfo subpassEndInfo = {
+            VK_STRUCTURE_TYPE_SUBPASS_END_INFO,
+            pFdmOffsetEndInfo,
+        };
+
+        ctx.vkd.cmdBeginRenderPass2(cmdBuffer, &renderPassBeginInfo, &subpassBeginInfo);
         ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *pipelineLayout, 0u, 1u, &descriptorSet.get(), 0u, nullptr);
         ctx.vkd.cmdPushConstants(cmdBuffer, *pipelineLayout, pcStages, 0u, pcSize, &pcValues);
         fillPipeline.bind(cmdBuffer);
         ctx.vkd.cmdDraw(cmdBuffer, vertexCount, instanceCount, 0u, 0u);
-        ctx.vkd.cmdNextSubpass(cmdBuffer, VK_SUBPASS_CONTENTS_INLINE);
+        ctx.vkd.cmdNextSubpass2(cmdBuffer, &subpassBeginInfo, &subpassEndInfo);
         ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *pipelineLayout, 0u, 1u, &descriptorSet.get(), 0u, nullptr);
         ctx.vkd.cmdPushConstants(cmdBuffer, *pipelineLayout, pcStages, 0u, pcSize, &pcValues);
         resolvePipeline.bind(cmdBuffer);
         ctx.vkd.cmdDraw(cmdBuffer, vertexCount, instanceCount, 0u, 0u);
-        endRenderPass(ctx.vkd, cmdBuffer);
+        ctx.vkd.cmdEndRenderPass2(cmdBuffer, &subpassEndInfo);
         ssFinalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
 
@@ -5330,31 +5471,17 @@ tcu::TestStatus FDMInstance::iterate(void)
                                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, de::dataOrNull(prepareCopies),
                                           prepareCopies.size());
 
-            const std::vector<VkRenderingAttachmentInfo> copyAttInfos{
-                VkRenderingAttachmentInfo{
-                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                    nullptr,
-                    *copyView0,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_RESOLVE_MODE_NONE,
-                    VK_NULL_HANDLE,
-                    VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR,
-                    VK_ATTACHMENT_STORE_OP_STORE,
-                    clearValues.front(),
-                },
-                VkRenderingAttachmentInfo{
-                    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                    nullptr,
-                    *copyView1,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_RESOLVE_MODE_NONE,
-                    VK_NULL_HANDLE,
-                    VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_ATTACHMENT_LOAD_OP_CLEAR,
-                    VK_ATTACHMENT_STORE_OP_STORE,
-                    clearValues.front(),
-                },
+            VkRenderingAttachmentInfo copyAttInfo{
+                VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                nullptr,
+                VK_NULL_HANDLE, // Will be overwritten below in each iteration.
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_RESOLVE_MODE_NONE,
+                VK_NULL_HANDLE,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_ATTACHMENT_LOAD_OP_CLEAR,
+                VK_ATTACHMENT_STORE_OP_STORE,
+                clearValues.front(),
             };
 
             const VkRenderingInfo copyRenderingInfo = {
@@ -5364,28 +5491,68 @@ tcu::TestStatus FDMInstance::iterate(void)
                 scissors.front(),
                 layerCount,
                 0u,
-                de::sizeU32(copyAttInfos),
-                de::dataOrNull(copyAttInfos),
+                1u,
+                &copyAttInfo,
                 nullptr,
                 nullptr,
             };
-            ctx.vkd.cmdBeginRendering(cmdBuffer, &copyRenderingInfo);
-            ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *copyPipelineLayout, 0u, 1u, &copyDescriptorSet.get(),
-                                          0u, nullptr);
+
+            const std::vector<VkImageView> attViews{*copyView0, *copyView1};
+            const std::vector<VkDescriptorSet> descriptorSets{*copyDescriptorSet0, *copyDescriptorSet1};
+            DE_ASSERT(attViews.size() == descriptorSets.size());
+
             copyPipeline.bind(cmdBuffer);
-            ctx.vkd.cmdDraw(cmdBuffer, vertexCount, layerCount, 0u, 0u);
-            endRendering(ctx.vkd, cmdBuffer);
+            for (size_t i = 0; i < attViews.size(); ++i)
+            {
+                const auto &view = attViews.at(i);
+                const auto &ds   = descriptorSets.at(i);
+
+                copyAttInfo.imageView = view;
+                ctx.vkd.cmdBeginRendering(cmdBuffer, &copyRenderingInfo);
+                ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *copyPipelineLayout, 0u, 1u, &ds, 0u, nullptr);
+                ctx.vkd.cmdDraw(cmdBuffer, vertexCount, layerCount, 0u, 0u);
+                endRendering(ctx.vkd, cmdBuffer);
+            }
         }
         else
         {
             const std::vector<VkClearValue> copyClearValues{clearValues.front(), clearValues.front()};
-            beginRenderPass(ctx.vkd, cmdBuffer, *renderPassCopy, *framebufferCopy, scissors.front(),
-                            de::sizeU32(copyClearValues), de::dataOrNull(copyClearValues));
-            ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *copyPipelineLayout, 0u, 1u, &copyDescriptorSet.get(),
-                                          0u, nullptr);
+            const std::vector<VkFramebuffer> framebuffers{*framebufferCopy0, *framebufferCopy1};
+            const std::vector<VkDescriptorSet> descriptorSets{*copyDescriptorSet0, *copyDescriptorSet1};
+            DE_ASSERT(framebuffers.size() == descriptorSets.size());
+
             copyPipeline.bind(cmdBuffer);
-            ctx.vkd.cmdDraw(cmdBuffer, vertexCount, layerCount, 0u, 0u);
-            endRenderPass(ctx.vkd, cmdBuffer);
+            for (size_t i = 0; i < framebuffers.size(); ++i)
+            {
+                const auto &fb = framebuffers.at(i);
+                const auto &ds = descriptorSets.at(i);
+
+                const VkRenderPassBeginInfo renderPassBeginInfo = {
+                    VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                    nullptr,
+                    *renderPassCopy,
+                    fb,
+                    scissors.front(),
+                    de::sizeU32(copyClearValues),
+                    de::dataOrNull(copyClearValues),
+                };
+
+                const VkSubpassBeginInfo subpassBeginInfo = {
+                    VK_STRUCTURE_TYPE_SUBPASS_BEGIN_INFO,
+                    nullptr,
+                    VK_SUBPASS_CONTENTS_INLINE,
+                };
+
+                const VkSubpassEndInfo subpassEndInfo = {
+                    VK_STRUCTURE_TYPE_SUBPASS_END_INFO,
+                    nullptr,
+                };
+
+                ctx.vkd.cmdBeginRenderPass2(cmdBuffer, &renderPassBeginInfo, &subpassBeginInfo);
+                ctx.vkd.cmdBindDescriptorSets(cmdBuffer, bindPoint, *copyPipelineLayout, 0u, 1u, &ds, 0u, nullptr);
+                ctx.vkd.cmdDraw(cmdBuffer, vertexCount, layerCount, 0u, 0u);
+                ctx.vkd.cmdEndRenderPass2(cmdBuffer, &subpassEndInfo);
+            }
         }
     }
 
@@ -5598,6 +5765,311 @@ tcu::TestStatus FDMInstance::iterate(void)
     return tcu::TestStatus::pass("Pass");
 }
 
+void SingleSampleClearCheckSupport(Context &context, SharedGroupParams groupParams)
+{
+    const auto &crFeatures = context.getCustomResolveFeaturesEXT();
+    if (!crFeatures.customResolve)
+        TCU_THROW(NotSupportedError, "customResolve not supported");
+
+    const auto &drlrFeatures = context.getDynamicRenderingLocalReadFeatures();
+    if (!drlrFeatures.dynamicRenderingLocalRead)
+        TCU_THROW(NotSupportedError, "dynamicRenderingLocalRead not supported");
+
+    const auto ctx = context.getContextCommonData();
+    checkPipelineConstructionRequirements(ctx.vki, ctx.physicalDevice, groupParams->pipelineConstructionType);
+}
+
+void SingleSampleClearInitPrograms(vk::SourceCollections &dst, SharedGroupParams)
+{
+    std::ostringstream frag;
+    frag << "#version 460\n"
+         << "// pc.extent.w is the sample count\n"
+         << "layout (push_constant, std430) uniform PCBlock { ivec4 extent; } pc;\n"
+         << "layout (set=0, binding=0, input_attachment_index=0) uniform subpassInputMS inColor0;\n"
+         << "layout (location=0) out vec4 outColor0;\n"
+         << "void main (void) {\n"
+         << "    vec4 avgColor0 = vec4(0.0);\n"
+         << "    for (int i = 0; i < pc.extent.w; ++i)\n"
+         << "        avgColor0 += subpassLoad(inColor0, i);\n"
+         << "    avgColor0 /= float(pc.extent.w);\n"
+         << "    outColor0 = avgColor0;\n"
+         << "}\n";
+    dst.glslSources.add("frag") << glu::FragmentSource(frag.str());
+
+    std::ostringstream vert;
+    vert << "#version 460\n"
+         << "vec2 positions[3] = vec2[](\n"
+         << "    vec2(-1.0, -1.0),\n"
+         << "    vec2( 3.0, -1.0),\n"
+         << "    vec2(-1.0,  3.0)\n"
+         << ");\n"
+         << "void main (void) {\n"
+         << "    gl_Position = vec4(positions[gl_VertexIndex % 3], 0.0, 1.0);\n"
+         << "}\n";
+    dst.glslSources.add("vert") << glu::VertexSource(vert.str());
+}
+
+tcu::TestStatus SingleSampleClearIterate(Context &context, SharedGroupParams groupParams)
+{
+    const tcu::IVec3 extent(32, 32, 1);
+    const auto extentVk     = makeExtent3D(extent);
+    const auto msImageUsage = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
+    const auto ssImageUsage =
+        (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    const auto ctx        = context.getContextCommonData();
+    const auto colorSRR   = makeDefaultImageSubresourceRange();
+    const auto descType   = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+    const auto descStages = static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_FRAGMENT_BIT);
+    const auto msRPLayout = VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ;
+    const auto ssRPLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    const VkImageCreateInfo msImgCreateInfo{
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        nullptr,
+        0u,
+        VK_IMAGE_TYPE_2D,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        extentVk,
+        1u,
+        1u,
+        VK_SAMPLE_COUNT_4_BIT,
+        VK_IMAGE_TILING_OPTIMAL,
+        msImageUsage,
+        VK_SHARING_MODE_EXCLUSIVE,
+        0u,
+        nullptr,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    auto ssImgCreateInfo    = msImgCreateInfo;
+    ssImgCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ssImgCreateInfo.usage   = ssImageUsage;
+
+    ImageWithMemory msImage(ctx.vkd, ctx.device, ctx.allocator, msImgCreateInfo, MemoryRequirement::Any);
+    const auto msImageView =
+        makeImageView(ctx.vkd, ctx.device, *msImage, VK_IMAGE_VIEW_TYPE_2D, msImgCreateInfo.format, colorSRR);
+
+    ImageWithBuffer ssImage(ctx.vkd, ctx.device, ctx.allocator, ssImgCreateInfo.extent, ssImgCreateInfo.format,
+                            ssImgCreateInfo.usage, ssImgCreateInfo.imageType);
+
+    // Descriptors and pipeline layout.
+    DescriptorPoolBuilder poolBuilder;
+    poolBuilder.addType(descType);
+    const auto descriptorPool =
+        poolBuilder.build(ctx.vkd, ctx.device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u);
+
+    DescriptorSetLayoutBuilder setLayoutBuilder;
+    setLayoutBuilder.addSingleBinding(descType, descStages);
+    const auto setLayout = setLayoutBuilder.build(ctx.vkd, ctx.device);
+
+    const auto pcSize   = DE_SIZEOF32(tcu::IVec4);
+    const auto pcStages = descStages;
+    const auto pcValue  = tcu::IVec4(extent.x(), extent.y(), extent.z(), static_cast<int>(msImgCreateInfo.samples));
+    const auto pcRange  = makePushConstantRange(pcStages, 0u, pcSize);
+
+    PipelineLayoutWrapper pipelineLayout(groupParams->pipelineConstructionType, ctx.vkd, ctx.device, *setLayout,
+                                         &pcRange);
+
+    const auto descriptorSet = makeDescriptorSet(ctx.vkd, ctx.device, *descriptorPool, *setLayout);
+    DescriptorSetUpdateBuilder setUpdateBuilder;
+    const auto binding = DescriptorSetUpdateBuilder::Location::binding;
+    const auto inputAttDesc =
+        makeDescriptorImageInfo(VK_NULL_HANDLE, *msImageView, VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ);
+    setUpdateBuilder.writeSingle(*descriptorSet, binding(0u), descType, &inputAttDesc);
+    setUpdateBuilder.update(ctx.vkd, ctx.device);
+
+    const auto &binaries = context.getBinaryCollection();
+    ShaderWrapper vertShader(ctx.vkd, ctx.device, binaries.get("vert"));
+    ShaderWrapper fragShader(ctx.vkd, ctx.device, binaries.get("frag"));
+
+    const VkPipelineVertexInputStateCreateInfo vertexInputState = initVulkanStructureConst();
+
+    const auto renderArea = makeRect2D(extent);
+    const auto scissor    = makeRect2D(0, 0, renderArea.extent.width / 2u, renderArea.extent.height / 2u); // Quadrant.
+    const std::vector<VkViewport> viewports(1u, makeViewport(extent));
+    const std::vector<VkRect2D> scissors(1u, scissor);
+
+    VkPipelineRenderingCreateInfo pipelineRenderingInfo{
+        VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        nullptr,
+        0u,
+        1u,
+        &msImgCreateInfo.format,
+        VK_FORMAT_UNDEFINED,
+        VK_FORMAT_UNDEFINED,
+    };
+
+    VkRenderingInputAttachmentIndexInfo renderingInputAttachmentIndexInfo{
+        VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO, nullptr, 1u, nullptr, nullptr, nullptr,
+    };
+
+    const VkPipelineMultisampleStateCreateInfo pipelineMultisampleState{
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        nullptr,
+        0u,
+        ssImgCreateInfo.samples,
+        VK_FALSE,
+        0.0f,
+        nullptr,
+        VK_FALSE,
+        VK_FALSE,
+    };
+
+    VkCustomResolveCreateInfoEXT customResolveCreateInfo{
+        VK_STRUCTURE_TYPE_CUSTOM_RESOLVE_CREATE_INFO_EXT,
+        nullptr,
+        VK_TRUE,
+        1u,
+        &msImgCreateInfo.format,
+        VK_FORMAT_UNDEFINED,
+        VK_FORMAT_UNDEFINED,
+    };
+
+    GraphicsPipelineWrapper pipeline(ctx.vki, ctx.vkd, ctx.physicalDevice, ctx.device, context.getDeviceExtensions(),
+                                     groupParams->pipelineConstructionType);
+    pipeline.setDefaultTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setDefaultRasterizationState()
+        .setDefaultDepthStencilState()
+        .setDefaultColorBlendState()
+        .setupVertexInputState(&vertexInputState)
+        .setupPreRasterizationShaderState(viewports, scissors, pipelineLayout, VK_NULL_HANDLE, 0u, vertShader, nullptr,
+                                          ShaderWrapper(), ShaderWrapper(), ShaderWrapper(), nullptr, nullptr,
+                                          &pipelineRenderingInfo)
+        .setupFragmentShaderState(pipelineLayout, VK_NULL_HANDLE, 0u, fragShader, nullptr, &pipelineMultisampleState,
+                                  nullptr, VK_NULL_HANDLE, nullptr, &renderingInputAttachmentIndexInfo,
+                                  &customResolveCreateInfo)
+        .setupFragmentOutputState(VK_NULL_HANDLE, 0u, nullptr, &pipelineMultisampleState)
+        .buildPipeline();
+
+    CommandPoolWithBuffer cmd(ctx.vkd, ctx.device, ctx.qfIndex);
+    const auto cmdBuffer = *cmd.cmdBuffer;
+
+    beginCommandBuffer(ctx.vkd, cmdBuffer);
+
+    // We will clear the single-sample image before using it in the render pass to color A, and we will clear the
+    // attachment on load to color B. In theory, the load operation should only affect the multisample attachment, and
+    // the contents of the single-sample attachment will become undefined when we start the custom resolve. The custom
+    // resolve will only draw to a quadrant of the image due to the scissor in the pipeline (see above), so at the end
+    // of the render pass instance, that quadrant should have color B (from the resolve). If the rest of the image also
+    // happens to have color B, we will emit a quality warning because, in theory, it's likely the implementation
+    // has also cleared the single-sample attachment, which is not needed.
+    const auto colorA   = tcu::Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    const auto colorB   = tcu::Vec4(0.0f, 0.0f, 1.0f, 1.0f);
+    const auto colorAVk = makeClearValueColor(colorA);
+    const auto colorBVk = makeClearValueColor(colorB);
+
+    {
+        // Clear single-sample image to color A.
+        const auto preClearBarrier =
+            makeImageMemoryBarrier(0u, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ssImage.getImage(), colorSRR);
+        cmdPipelineImageMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                      VK_PIPELINE_STAGE_TRANSFER_BIT, &preClearBarrier);
+
+        ctx.vkd.cmdClearColorImage(cmdBuffer, ssImage.getImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &colorAVk.color,
+                                   1u, &colorSRR);
+
+        const auto postClearBarrier = makeImageMemoryBarrier(
+            VK_ACCESS_TRANSFER_WRITE_BIT, (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ssRPLayout, ssImage.getImage(), colorSRR);
+        cmdPipelineImageMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, &postClearBarrier);
+    }
+    {
+        // Move multisample image to the expected layout.
+        const auto barrier =
+            makeImageMemoryBarrier(0u, (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
+                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ, *msImage, colorSRR);
+        cmdPipelineImageMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, &barrier);
+    }
+
+    const VkRenderingAttachmentInfo renderingAttInfo{
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        *msImageView,
+        msRPLayout,
+        VK_RESOLVE_MODE_CUSTOM_BIT_EXT,
+        ssImage.getImageView(),
+        ssRPLayout,
+        VK_ATTACHMENT_LOAD_OP_CLEAR,      // Important, see comment above.
+        VK_ATTACHMENT_STORE_OP_DONT_CARE, // Should be overridden to store due to VK_RESOLVE_MODE_CUSTOM_BIT_EXT.
+        colorBVk,
+    };
+
+    const VkRenderingInfo renderingInfo{
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        static_cast<VkRenderingFlags>(VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT),
+        renderArea,
+        msImgCreateInfo.arrayLayers,
+        0u,
+        1u,
+        &renderingAttInfo,
+        nullptr,
+        nullptr,
+    };
+
+    ctx.vkd.cmdBeginRendering(cmdBuffer, &renderingInfo);
+    {
+        // Sync the render pass clear with the fragment shader read.
+        const auto srcAccess = static_cast<VkAccessFlags>(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        const auto dstAccess = static_cast<VkAccessFlags>(VK_ACCESS_INPUT_ATTACHMENT_READ_BIT);
+        const auto barrier   = makeImageMemoryBarrier(srcAccess, dstAccess, msRPLayout, msRPLayout, *msImage, colorSRR);
+        const auto dependencyFlags = static_cast<VkDependencyFlags>(VK_DEPENDENCY_BY_REGION_BIT);
+        cmdPipelineImageMemoryBarrier(ctx.vkd, cmdBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, &barrier, 1, dependencyFlags);
+    }
+    syncAttachmentLoadsStores(ctx.vkd, cmdBuffer, true);
+    const VkBeginCustomResolveInfoEXT beginCustomResolveInfo = initVulkanStructureConst();
+    ctx.vkd.cmdBeginCustomResolveEXT(cmdBuffer, &beginCustomResolveInfo);
+    ctx.vkd.cmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout.get(), 0u, 1u,
+                                  &descriptorSet.get(), 0u, nullptr);
+    ctx.vkd.cmdPushConstants(cmdBuffer, pipelineLayout.get(), pcStages, 0u, pcSize, &pcValue);
+    pipeline.bind(cmdBuffer);
+    ctx.vkd.cmdSetRenderingInputAttachmentIndices(cmdBuffer, &renderingInputAttachmentIndexInfo);
+    ctx.vkd.cmdDraw(cmdBuffer, 3u, 1u, 0u, 0u); // 3 vertices for the full screen triangle, see frag shader.
+    ctx.vkd.cmdEndRendering(cmdBuffer);
+
+    copyImageToBuffer(ctx.vkd, cmdBuffer, ssImage.getImage(), ssImage.getBuffer(), extent.swizzle(0, 1));
+
+    endCommandBuffer(ctx.vkd, cmdBuffer);
+    submitCommandsAndWait(ctx.vkd, ctx.device, ctx.queue, cmdBuffer);
+
+    invalidateAlloc(ctx.vkd, ctx.device, ssImage.getBufferAllocation());
+
+    const auto tcuFormat = mapVkFormat(ssImgCreateInfo.format);
+    tcu::TextureLevel refLevel(tcuFormat, extent.x(), extent.y(), extent.z());
+    tcu::PixelBufferAccess reference = refLevel.getAccess();
+    const auto refRegion =
+        tcu::getSubregion(reference, scissor.offset.x, scissor.offset.y, static_cast<int>(scissor.extent.width),
+                          static_cast<int>(scissor.extent.height));
+    tcu::clear(refRegion, colorB);
+
+    tcu::ConstPixelBufferAccess result(tcuFormat, extent, ssImage.getBufferAllocation().getHostPtr());
+    const auto resRegion =
+        tcu::getSubregion(result, scissor.offset.x, scissor.offset.y, static_cast<int>(scissor.extent.width),
+                          static_cast<int>(scissor.extent.height));
+
+    bool fail = false;
+    auto &log = context.getTestContext().getLog();
+    const tcu::Vec4 threshold(0.0f);
+
+    if (!tcu::floatThresholdCompare(log, "ScissorRegion", "", refRegion, resRegion, threshold,
+                                    tcu::COMPARE_LOG_ON_ERROR))
+        fail = true;
+
+    if (fail)
+        TCU_FAIL("Unexpected output in color buffer; check log for details --");
+
+    const auto bottomRightCorner = result.getPixel(extent.x() - 1, extent.y() - 1);
+    if (bottomRightCorner == colorB)
+        TCU_THROW(QualityWarning,
+                  "Single-sample attachment appears to have been cleared with the multisample clear value");
+
+    return tcu::TestStatus::pass("Pass");
+}
+
 std::string yesNo(bool value)
 {
     return (value ? "yes" : "no");
@@ -5643,762 +6115,777 @@ tcu::TestCaseGroup *createRenderPassCustomResolveTests(tcu::TestContext &testCtx
         SharedGroupParams groupParams{new GroupParams(*origGroupParams)};
         groupParams->pipelineConstructionType = constructionTypeCase.pipelineConstructionType;
 
+        if (origGroupParams->renderingType != RENDERING_TYPE_RENDERPASS2)
         {
-            // Simple tests: one attachment, no attachment index changes, no format changes.
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R8G8B8A8_UNORM, 0u, true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::AVERAGE, StrategyParams()),
-                },
-            });
-
-            constructionGroup->addChild(new CustomResolveCase(testCtx, "simple_average", params));
-
             {
-                // Using the "average" resolving strategy may not let us see if the driver is resolving the values
-                // itself by mistake, so we add variants with a fixed value and a specific sample.
-                auto &resolve = params.resolvePasses.back().attachmentResolves.back();
-
-                resolve.resolveType   = ResolveType::FIXED_VALUE;
-                resolve.resolveParams = StrategyParams(tcu::Vec4(0.0f, 0.0f, 1.0f, 1.0f));
-                constructionGroup->addChild(new CustomResolveCase(testCtx, "simple_fixed", params));
-
-                resolve.resolveType   = ResolveType::SELECTED_SAMPLE;
-                resolve.resolveParams = StrategyParams(2u);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, "simple_sample_2", params));
-            }
-
-            {
-                // Test omitting some information.
-                if (params.useDynamicRendering() &&
-                    isConstructionTypeLibrary(params.groupParams->pipelineConstructionType))
-                {
-                    params.uploadCustomResolveFragOutOnly = true;
-                    constructionGroup->addChild(
-                        new CustomResolveCase(testCtx, "simple_sample_2_no_frag_state_upload_info", params));
-                    params.uploadCustomResolveFragOutOnly = false;
-
-                    params.emptyCustomResolveInFragShader = true;
-                    constructionGroup->addChild(
-                        new CustomResolveCase(testCtx, "simple_sample_2_no_formats_frag_state_resolve", params));
-                    params.emptyCustomResolveInFragShader = false;
-
-                    params.unusedAttNoUploadCustomInfo = true;
-                    constructionGroup->addChild(
-                        new CustomResolveCase(testCtx, "simple_sample_2_no_upload_custom_info", params));
-                    params.unusedAttNoUploadCustomInfo = false;
-                }
-            }
-        }
-        {
-            // Depth-only tests.
-            const std::vector<VkFormat> depthFormats{
-                VK_FORMAT_D16_UNORM,         VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT,
-                VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT,   VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(1u)),
-                },
-            });
-
-            for (const auto &format : depthFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName                           = "depth_only_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-        }
-        {
-            // Stencil-only tests.
-            const std::vector<VkFormat> stencilFormats{
-                VK_FORMAT_S8_UINT,
-                VK_FORMAT_D16_UNORM_S8_UINT,
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_STENCIL_BIT, ResolveType::AVERAGE, StrategyParams()),
-                },
-            });
-
-            for (const auto &format : stencilFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName                           = "stencil_only_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            params.disableStencilExport                                       = true;
-            params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
-            params.resolvePasses.back().attachmentResolves.back().resolveParams =
-                StrategyParams(tcu::Vec4(0.0f, 77.0f, 0.0f, 0.0f));
-
-            for (const auto &format : stencilFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "stencil_only_" + dsFormatNames.at(format) + "_no_stencil_export";
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-        }
-        {
-            // Combined depth-stencil tests, uploading both aspects at the same time.
-            const std::vector<VkFormat> dsFormats{
-                VK_FORMAT_D16_UNORM_S8_UINT,
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(3u)),
-                },
-            });
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_resolve_depth_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            params.resolvePasses.back().attachmentResolves.back().attachment.aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_resolve_stencil_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            params.resolvePasses.back().attachmentResolves.back().attachment.aspects =
-                (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-
-            for (const auto &format : dsFormats)
-            {
-                params.disableDepthWrites                     = false;
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_resolve_both_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-
-                params.disableDepthWrites = true;
-                const auto testName2 =
-                    "depth_stencil_upload_both_resolve_both_disable_depth_writes_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName2, params));
-
-                params.disableDepthWrites   = false;
-                params.disableStencilExport = true;
-                const auto lastAttResolve   = params.resolvePasses.back().attachmentResolves.back();
-                params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
-                params.resolvePasses.back().attachmentResolves.back().resolveParams =
-                    StrategyParams(tcu::Vec4(0.25f, 50.f, 0.0f, 0.0f));
-                const auto testName3 =
-                    "depth_stencil_upload_both_resolve_both_" + dsFormatNames.at(format) + "_no_stencil_export";
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName3, params));
-
-                // Restore previous resolve params.
-                params.resolvePasses.back().attachmentResolves.back() = lastAttResolve;
-                params.disableStencilExport                           = false;
-            }
-        }
-        {
-            // Combined depth-stencil tests, uploading one aspect at a time.
-            const std::vector<VkFormat> dsFormats{
-                VK_FORMAT_D16_UNORM_S8_UINT,
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
-            });
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
-                },
-            });
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_separate_resolve_depth_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            params.resolvePasses.back().attachmentResolves.back().attachment.aspects =
-                (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_separate_resolve_both_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            // Same without exporting stencil from the shaders.
-            params.disableStencilExport = true;
-            auto prevLastResolve        = params.resolvePasses.back().attachmentResolves.back();
-            params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
-            params.resolvePasses.back().attachmentResolves.back().resolveParams =
-                StrategyParams(tcu::Vec4(0.5f, 66.0f, 0.0f, 0.0f));
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_separate_resolve_both_" + dsFormatNames.at(format) +
-                                      "_no_stencil_export";
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            // Restore previous params and resolve stencil only.
-            params.disableStencilExport                                              = false;
-            params.resolvePasses.back().attachmentResolves.back()                    = prevLastResolve;
-            params.resolvePasses.back().attachmentResolves.back().attachment.aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_separate_resolve_stencil_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            // Same without exporting stencil from the shaders.
-            params.disableStencilExport = true;
-            prevLastResolve             = params.resolvePasses.back().attachmentResolves.back();
-            params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
-            params.resolvePasses.back().attachmentResolves.back().resolveParams =
-                StrategyParams(tcu::Vec4(0.0f, 66.0f, 0.0f, 0.0f));
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_both_separate_resolve_stencil_" + dsFormatNames.at(format) +
-                                      "_no_stencil_export";
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-
-            // Do not upload stencil, then resolve only depth.
-            params.disableStencilExport = false;
-            params.uploadPasses.pop_back();
-            params.resolvePasses.back().attachmentResolves.back() = prevLastResolve; // Restore state and params.
-            params.resolvePasses.back().attachmentResolves.back().attachment.aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
-
-            for (const auto &format : dsFormats)
-            {
-                params.attachmentList.back().attachmentFormat = format;
-                params.attachmentList.back().resolveFormat    = format;
-                const auto testName = "depth_stencil_upload_depth_resolve_depth_" + dsFormatNames.at(format);
-                constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-            }
-        }
-        // Depth/stencil with resolve format not the same as the upload format.
-        // Upload depth and resolve depth using different formats.
-        {
-            TestParams params;
-            params.groupParams = groupParams;
-
-            const std::vector<VkFormat> depthFormats{
-                VK_FORMAT_D16_UNORM,         VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT,
-                VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT,   VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
-                },
-            });
-
-            for (const auto origFormat : depthFormats)
-                for (const auto resolveFormat : depthFormats)
-                {
-                    if (origFormat == resolveFormat)
-                        continue;
-
-                    params.attachmentList.front().attachmentFormat = origFormat;
-                    params.attachmentList.front().resolveFormat    = resolveFormat;
-
-                    const auto testName = "depth_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
-                                          dsFormatNames.at(resolveFormat);
-                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-                }
-        }
-        {
-            // Depth/stencil with resolve format not the same as the upload format.
-            // Upload stencil and resolve stencil using different formats.
-            TestParams params;
-            params.groupParams = groupParams;
-
-            const std::vector<VkFormat> stencilFormats{
-                VK_FORMAT_S8_UINT,
-                VK_FORMAT_D16_UNORM_S8_UINT,
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_STENCIL_BIT, ResolveType::SELECTED_SAMPLE,
-                                      StrategyParams(3u)),
-                },
-            });
-
-            for (const auto origFormat : stencilFormats)
-                for (const auto resolveFormat : stencilFormats)
-                {
-                    if (origFormat == resolveFormat)
-                        continue;
-
-                    params.attachmentList.front().attachmentFormat = origFormat;
-                    params.attachmentList.front().resolveFormat    = resolveFormat;
-
-                    const auto testName = "stencil_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
-                                          dsFormatNames.at(resolveFormat);
-                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-                }
-        }
-        {
-            // Depth/stencil with resolve format not the same as the upload format.
-            // Upload depth and stencil together, and resolve them in different formats.
-            TestParams params;
-            params.groupParams = groupParams;
-
-            const std::vector<VkFormat> dsFormats{
-                VK_FORMAT_D16_UNORM_S8_UINT,
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            const UploadPass depthUploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
-            };
-
-            const UploadPass stencilUploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
-            };
-
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
-                                      ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
-                },
-            });
-
-            for (const auto origFormat : dsFormats)
-                for (const auto resolveFormat : dsFormats)
-                {
-                    if (origFormat == resolveFormat)
-                        continue;
-
-                    params.attachmentList.front().attachmentFormat = origFormat;
-                    params.attachmentList.front().resolveFormat    = resolveFormat;
-
-                    const auto testName = "depth_stencil_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
-                                          dsFormatNames.at(resolveFormat);
-                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
-                }
-        }
-        {
-            // Depth/stencil with resolve format not the same as the upload format.
-            // Upload depth and stencil separately, and resolve them in different formats.
-            TestParams params;
-            params.groupParams = groupParams;
-
-            const std::vector<VkFormat> dsFormats{
-                VK_FORMAT_D16_UNORM_S8_UINT,
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            const UploadPass depthUploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
-            };
-
-            const UploadPass stencilUploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
-            };
-
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
-                                      ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
-                },
-            });
-
-            for (const auto origFormat : dsFormats)
-                for (const auto resolveFormat : dsFormats)
-                {
-                    if (origFormat == resolveFormat)
-                        continue;
-
-                    params.attachmentList.front().attachmentFormat = origFormat;
-                    params.attachmentList.front().resolveFormat    = resolveFormat;
-
-                    for (const bool uploadDepthFirst : {true, false})
+                // Simple tests: one attachment, no attachment index changes, no format changes.
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R8G8B8A8_UNORM, 0u, true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
                     {
-                        params.uploadPasses.clear();
-                        params.uploadPasses.push_back(uploadDepthFirst ? depthUploadPass : stencilUploadPass);
-                        params.uploadPasses.push_back(uploadDepthFirst ? stencilUploadPass : depthUploadPass);
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::AVERAGE, StrategyParams()),
+                    },
+                });
 
-                        const auto testName = "depth_stencil_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
-                                              dsFormatNames.at(resolveFormat) + "_upload_" +
-                                              (uploadDepthFirst ? "depth" : "stencil") + "_first";
-                        constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                constructionGroup->addChild(new CustomResolveCase(testCtx, "simple_average", params));
+
+                {
+                    // Using the "average" resolving strategy may not let us see if the driver is resolving the values
+                    // itself by mistake, so we add variants with a fixed value and a specific sample.
+                    auto &resolve = params.resolvePasses.back().attachmentResolves.back();
+
+                    resolve.resolveType   = ResolveType::FIXED_VALUE;
+                    resolve.resolveParams = StrategyParams(tcu::Vec4(0.0f, 0.0f, 1.0f, 1.0f));
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, "simple_fixed", params));
+
+                    resolve.resolveType   = ResolveType::SELECTED_SAMPLE;
+                    resolve.resolveParams = StrategyParams(2u);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, "simple_sample_2", params));
+                }
+
+                {
+                    // Test omitting some information.
+                    if (params.useDynamicRendering() &&
+                        isConstructionTypeLibrary(params.groupParams->pipelineConstructionType))
+                    {
+                        params.uploadCustomResolveFragOutOnly = true;
+                        constructionGroup->addChild(
+                            new CustomResolveCase(testCtx, "simple_sample_2_no_frag_state_upload_info", params));
+                        params.uploadCustomResolveFragOutOnly = false;
+
+                        params.emptyCustomResolveInFragShader = true;
+                        constructionGroup->addChild(
+                            new CustomResolveCase(testCtx, "simple_sample_2_no_formats_frag_state_resolve", params));
+                        params.emptyCustomResolveInFragShader = false;
+
+                        params.unusedAttNoUploadCustomInfo = true;
+                        constructionGroup->addChild(
+                            new CustomResolveCase(testCtx, "simple_sample_2_no_upload_custom_info", params));
+                        params.unusedAttNoUploadCustomInfo = false;
                     }
                 }
-        }
-        {
-            // Attachment index tests: simple test but the resolve pipeline uses a different att index.
-            // This will prevent the upload and resolve passes from being merged in dynamic rendering.
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R8G8B8A8_UNORM, 1u, true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(3u)),
-                },
-            });
-
-            constructionGroup->addChild(new CustomResolveCase(testCtx, "att_index_change", params));
-
-            if (groupParams->renderingType == RENDERING_TYPE_DYNAMIC_RENDERING)
-            {
-                params.locationRemapping = true;
-                constructionGroup->addChild(new CustomResolveCase(testCtx, "att_index_change_with_remap", params));
             }
-        }
-        {
-            // Different resolve format: simple test, but the resolve attachment has a different format.
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R16G16B16A16_UNORM, 0u, true, true);
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::AVERAGE, StrategyParams()),
-                },
-            });
-
-            constructionGroup->addChild(new CustomResolveCase(testCtx, "format_change", params));
-
-            std::swap(params.attachmentList.back().attachmentFormat, params.attachmentList.back().resolveFormat);
-            constructionGroup->addChild(new CustomResolveCase(testCtx, "format_change_reverse", params));
-        }
-        {
-            // Complex case with multiple attachments, upload passes and resolves, including format and index changes.
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R16G16B16A16_UNORM, 1u, true, true);
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R16G16B16A16_UNORM, 0u, true, true);
-            params.uploadPasses.push_back(UploadPass{
-                // Upload to top half.
-                CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
-                 AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-            params.uploadPasses.push_back(UploadPass{
-                // Upload to bottom half.
-                CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, 0.0f)),
-                {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
-                 AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                // Resolving first attachment.
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(3u)),
-                },
-            });
-            params.resolvePasses.push_back(ResolvePass{
-                // Resolving the second attachment, partially.
-                CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(1u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::AVERAGE, StrategyParams()),
-                },
-            });
-
-            constructionGroup->addChild(
-                new CustomResolveCase(testCtx, "color_multi_upload_multi_resolve_complex", params));
-
-            // Simplification of the previous case removing the format and index change.
-            for (uint32_t i = 0u; i < de::sizeU32(params.attachmentList); ++i)
             {
-                auto &attInfo           = params.attachmentList.at(i);
-                attInfo.resolveFormat   = VK_FORMAT_R8G8B8A8_UNORM;
-                attInfo.resolveLocation = i;
-            }
+                // Depth-only tests.
+                const std::vector<VkFormat> depthFormats{
+                    VK_FORMAT_D16_UNORM,         VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT,
+                    VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT,   VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
 
-            constructionGroup->addChild(
-                new CustomResolveCase(testCtx, "color_multi_upload_multi_resolve_simple", params));
-        }
-        {
-            // More complex case mixing color and depth/stencil attachments, with multiple upload and resolve passes.
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R16G16B16A16_UNORM, 1u, true, true);
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
-                                               VK_FORMAT_R8G8B8A8_UNORM, 2u, true, true);
-            params.attachmentList.emplace_back(VK_FORMAT_R16G16B16A16_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R8G8B8A8_UNORM, 0u, true, true);
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(1u)),
+                    },
+                });
 
-            // The last attachment will be depth/stencil, but the format will be chosen below.
-            params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
-                                               true, true);
-
-            // Last color attachment.
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(2u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-
-            // Middle attachment. This needs to be separate because it's single-sampled.
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
-
-            // First attachment together with depth/stencil.
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                for (const auto &format : depthFormats)
                 {
-                    AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
-                    AttachmentIndexAspect(3u, 0u /*will be replaced below*/),
-                },
-            });
-
-            // Resolve last attachment first.
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {
-                    AttachmentResolve(2u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(1u)),
-                },
-            });
-
-            // Finally, first and depth/stencil.
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(1.0f, 2.0f), tcu::Vec2(0.0f, -1.0f)),
-                {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(1u)),
-                    AttachmentResolve(3u, 0u /*will be replaced below*/, ResolveType::AVERAGE, StrategyParams()),
-                },
-            });
-
-            // We want to test different formats for this test.
-            const std::vector<VkFormat> dsFormats{
-                VK_FORMAT_D24_UNORM_S8_UINT,
-                VK_FORMAT_D32_SFLOAT_S8_UINT,
-            };
-
-            // We'd like to test custom resolves for both depth/stencil as well as depth-only, for implementations that
-            // do not support VK_EXT_shader_stencil_export.
-            const std::vector<VkImageAspectFlags> dsAspects{
-                (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
-                VK_IMAGE_ASPECT_DEPTH_BIT,
-            };
-
-            for (const auto &format : dsFormats)
-                for (const auto &aspects : dsAspects)
-                {
-                    const auto nameSuffix = ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) == 0u ? "_no_stencil" : "");
-
                     params.attachmentList.back().attachmentFormat = format;
                     params.attachmentList.back().resolveFormat    = format;
+                    const auto testName                           = "depth_only_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
+            }
+            {
+                // Stencil-only tests.
+                const std::vector<VkFormat> stencilFormats{
+                    VK_FORMAT_S8_UINT,
+                    VK_FORMAT_D16_UNORM_S8_UINT,
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
 
-                    for (auto &pass : params.uploadPasses)
-                        for (auto &att : pass.attachments)
-                        {
-                            if ((att.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
-                                att.aspects = aspects;
-                        }
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_STENCIL_BIT, ResolveType::AVERAGE, StrategyParams()),
+                    },
+                });
 
-                    for (auto &pass : params.resolvePasses)
-                        for (auto &att : pass.attachmentResolves)
-                        {
-                            if ((att.attachment.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
-                                att.attachment.aspects = aspects;
-                        }
-
-                    const auto testName = "mix_multi_upload_multi_resolve_" + dsFormatNames.at(format) + nameSuffix;
+                for (const auto &format : stencilFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName                           = "stencil_only_" + dsFormatNames.at(format);
                     constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
                 }
 
-            // Now we swap the resolve passes and make the resolve attachment locations the identity, which should
-            // enable pass merging with dynamic rendering.
-            for (uint32_t i = 0u; i < de::sizeU32(params.attachmentList); ++i)
-                params.attachmentList.at(i).resolveLocation = i;
-            std::swap(params.resolvePasses.front(), params.resolvePasses.back());
+                params.disableStencilExport                                       = true;
+                params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
+                params.resolvePasses.back().attachmentResolves.back().resolveParams =
+                    StrategyParams(tcu::Vec4(0.0f, 77.0f, 0.0f, 0.0f));
 
-            for (const auto &format : dsFormats)
-                for (const auto &aspects : dsAspects)
+                for (const auto &format : stencilFormats)
                 {
-                    const auto nameSuffix = ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) == 0u ? "_no_stencil" : "");
-
                     params.attachmentList.back().attachmentFormat = format;
                     params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "stencil_only_" + dsFormatNames.at(format) + "_no_stencil_export";
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
+            }
+            {
+                // Combined depth-stencil tests, uploading both aspects at the same time.
+                const std::vector<VkFormat> dsFormats{
+                    VK_FORMAT_D16_UNORM_S8_UINT,
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
 
-                    for (auto &pass : params.uploadPasses)
-                        for (auto &att : pass.attachments)
-                        {
-                            if ((att.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
-                                att.aspects = aspects;
-                        }
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(3u)),
+                    },
+                });
 
-                    for (auto &pass : params.resolvePasses)
-                        for (auto &att : pass.attachmentResolves)
-                        {
-                            if ((att.attachment.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
-                                att.attachment.aspects = aspects;
-                        }
+                for (const auto &format : dsFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "depth_stencil_upload_both_resolve_depth_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
 
+                params.resolvePasses.back().attachmentResolves.back().attachment.aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
+
+                for (const auto &format : dsFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "depth_stencil_upload_both_resolve_stencil_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
+
+                params.resolvePasses.back().attachmentResolves.back().attachment.aspects =
+                    (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
+
+                for (const auto &format : dsFormats)
+                {
+                    params.disableDepthWrites                     = false;
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "depth_stencil_upload_both_resolve_both_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+
+                    params.disableDepthWrites = true;
+                    const auto testName2 =
+                        "depth_stencil_upload_both_resolve_both_disable_depth_writes_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName2, params));
+
+                    params.disableDepthWrites   = false;
+                    params.disableStencilExport = true;
+                    const auto lastAttResolve   = params.resolvePasses.back().attachmentResolves.back();
+                    params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
+                    params.resolvePasses.back().attachmentResolves.back().resolveParams =
+                        StrategyParams(tcu::Vec4(0.25f, 50.f, 0.0f, 0.0f));
+                    const auto testName3 =
+                        "depth_stencil_upload_both_resolve_both_" + dsFormatNames.at(format) + "_no_stencil_export";
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName3, params));
+
+                    // Restore previous resolve params.
+                    params.resolvePasses.back().attachmentResolves.back() = lastAttResolve;
+                    params.disableStencilExport                           = false;
+                }
+            }
+            {
+                // Combined depth-stencil tests, uploading one aspect at a time.
+                const std::vector<VkFormat> dsFormats{
+                    VK_FORMAT_D16_UNORM_S8_UINT,
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
+
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
+                });
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(2u)),
+                    },
+                });
+
+                for (const auto &format : dsFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
                     const auto testName =
-                        "mix_multi_upload_multi_resolve_with_merge_" + dsFormatNames.at(format) + nameSuffix;
+                        "depth_stencil_upload_both_separate_resolve_depth_" + dsFormatNames.at(format);
                     constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
                 }
-        }
-        {
-            // Upload and resolve multiple color attachments at the same time, with and without remapping.
-            TestParams params;
-            params.groupParams = groupParams;
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R16G16B16A16_UNORM, 1u, true, true);
-            params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
-                                               VK_FORMAT_R8G8B8A8_UNORM, 2u, true, true);
-            params.attachmentList.emplace_back(VK_FORMAT_R16G16B16A16_UNORM, VK_SAMPLE_COUNT_4_BIT,
-                                               VK_FORMAT_R8G8B8A8_UNORM, 0u, true, true);
 
-            // Middle attachment. This needs to be separate because it's single-sampled.
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
-                {AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
-            });
+                params.resolvePasses.back().attachmentResolves.back().attachment.aspects =
+                    (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
 
-            // First and last color attachments.
-            params.uploadPasses.push_back(UploadPass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                for (const auto &format : dsFormats)
                 {
-                    AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
-                    AttachmentIndexAspect(2u, VK_IMAGE_ASPECT_COLOR_BIT),
-                },
-            });
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "depth_stencil_upload_both_separate_resolve_both_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
 
-            // Resolve both multisample attachments.
-            params.resolvePasses.push_back(ResolvePass{
-                CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                // Same without exporting stencil from the shaders.
+                params.disableStencilExport = true;
+                auto prevLastResolve        = params.resolvePasses.back().attachmentResolves.back();
+                params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
+                params.resolvePasses.back().attachmentResolves.back().resolveParams =
+                    StrategyParams(tcu::Vec4(0.5f, 66.0f, 0.0f, 0.0f));
+
+                for (const auto &format : dsFormats)
                 {
-                    AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
-                    AttachmentResolve(2u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE, StrategyParams(1u)),
-                },
-            });
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName                           = "depth_stencil_upload_both_separate_resolve_both_" +
+                                          dsFormatNames.at(format) + "_no_stencil_export";
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
 
-            constructionGroup->addChild(
-                new CustomResolveCase(testCtx, "color_upload_resolve_multi_attachment", params));
+                // Restore previous params and resolve stencil only.
+                params.disableStencilExport                                              = false;
+                params.resolvePasses.back().attachmentResolves.back()                    = prevLastResolve;
+                params.resolvePasses.back().attachmentResolves.back().attachment.aspects = VK_IMAGE_ASPECT_STENCIL_BIT;
 
-            // Make the resolve attachment locations the identity, which should enable pass merging with dynamic
-            // rendering.
-            for (uint32_t i = 0u; i < de::sizeU32(params.attachmentList); ++i)
-                params.attachmentList.at(i).resolveLocation = i;
-            constructionGroup->addChild(
-                new CustomResolveCase(testCtx, "color_upload_resolve_multi_attachment_simple", params));
+                for (const auto &format : dsFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName =
+                        "depth_stencil_upload_both_separate_resolve_stencil_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
+
+                // Same without exporting stencil from the shaders.
+                params.disableStencilExport = true;
+                prevLastResolve             = params.resolvePasses.back().attachmentResolves.back();
+                params.resolvePasses.back().attachmentResolves.back().resolveType = ResolveType::FIXED_VALUE;
+                params.resolvePasses.back().attachmentResolves.back().resolveParams =
+                    StrategyParams(tcu::Vec4(0.0f, 66.0f, 0.0f, 0.0f));
+
+                for (const auto &format : dsFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "depth_stencil_upload_both_separate_resolve_stencil_" +
+                                          dsFormatNames.at(format) + "_no_stencil_export";
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
+
+                // Do not upload stencil, then resolve only depth.
+                params.disableStencilExport = false;
+                params.uploadPasses.pop_back();
+                params.resolvePasses.back().attachmentResolves.back() = prevLastResolve; // Restore state and params.
+                params.resolvePasses.back().attachmentResolves.back().attachment.aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
+
+                for (const auto &format : dsFormats)
+                {
+                    params.attachmentList.back().attachmentFormat = format;
+                    params.attachmentList.back().resolveFormat    = format;
+                    const auto testName = "depth_stencil_upload_depth_resolve_depth_" + dsFormatNames.at(format);
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                }
+            }
+            // Depth/stencil with resolve format not the same as the upload format.
+            // Upload depth and resolve depth using different formats.
+            {
+                TestParams params;
+                params.groupParams = groupParams;
+
+                const std::vector<VkFormat> depthFormats{
+                    VK_FORMAT_D16_UNORM,         VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT,
+                    VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT,   VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
+
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_DEPTH_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(2u)),
+                    },
+                });
+
+                for (const auto origFormat : depthFormats)
+                    for (const auto resolveFormat : depthFormats)
+                    {
+                        if (origFormat == resolveFormat)
+                            continue;
+
+                        params.attachmentList.front().attachmentFormat = origFormat;
+                        params.attachmentList.front().resolveFormat    = resolveFormat;
+
+                        const auto testName = "depth_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
+                                              dsFormatNames.at(resolveFormat);
+                        constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                    }
+            }
+            {
+                // Depth/stencil with resolve format not the same as the upload format.
+                // Upload stencil and resolve stencil using different formats.
+                TestParams params;
+                params.groupParams = groupParams;
+
+                const std::vector<VkFormat> stencilFormats{
+                    VK_FORMAT_S8_UINT,
+                    VK_FORMAT_D16_UNORM_S8_UINT,
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
+
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_STENCIL_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(3u)),
+                    },
+                });
+
+                for (const auto origFormat : stencilFormats)
+                    for (const auto resolveFormat : stencilFormats)
+                    {
+                        if (origFormat == resolveFormat)
+                            continue;
+
+                        params.attachmentList.front().attachmentFormat = origFormat;
+                        params.attachmentList.front().resolveFormat    = resolveFormat;
+
+                        const auto testName = "stencil_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
+                                              dsFormatNames.at(resolveFormat);
+                        constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                    }
+            }
+            {
+                // Depth/stencil with resolve format not the same as the upload format.
+                // Upload depth and stencil together, and resolve them in different formats.
+                TestParams params;
+                params.groupParams = groupParams;
+
+                const std::vector<VkFormat> dsFormats{
+                    VK_FORMAT_D16_UNORM_S8_UINT,
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
+
+                const UploadPass depthUploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
+                };
+
+                const UploadPass stencilUploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
+                };
+
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
+                                          ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
+                    },
+                });
+
+                for (const auto origFormat : dsFormats)
+                    for (const auto resolveFormat : dsFormats)
+                    {
+                        if (origFormat == resolveFormat)
+                            continue;
+
+                        params.attachmentList.front().attachmentFormat = origFormat;
+                        params.attachmentList.front().resolveFormat    = resolveFormat;
+
+                        const auto testName = "depth_stencil_format_change_" + dsFormatNames.at(origFormat) + "_to_" +
+                                              dsFormatNames.at(resolveFormat);
+                        constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                    }
+            }
+            {
+                // Depth/stencil with resolve format not the same as the upload format.
+                // Upload depth and stencil separately, and resolve them in different formats.
+                TestParams params;
+                params.groupParams = groupParams;
+
+                const std::vector<VkFormat> dsFormats{
+                    VK_FORMAT_D16_UNORM_S8_UINT,
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
+
+                const UploadPass depthUploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_DEPTH_BIT)},
+                };
+
+                const UploadPass stencilUploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_STENCIL_BIT)},
+                };
+
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
+                                          ResolveType::SELECTED_SAMPLE, StrategyParams(2u)),
+                    },
+                });
+
+                for (const auto origFormat : dsFormats)
+                    for (const auto resolveFormat : dsFormats)
+                    {
+                        if (origFormat == resolveFormat)
+                            continue;
+
+                        params.attachmentList.front().attachmentFormat = origFormat;
+                        params.attachmentList.front().resolveFormat    = resolveFormat;
+
+                        for (const bool uploadDepthFirst : {true, false})
+                        {
+                            params.uploadPasses.clear();
+                            params.uploadPasses.push_back(uploadDepthFirst ? depthUploadPass : stencilUploadPass);
+                            params.uploadPasses.push_back(uploadDepthFirst ? stencilUploadPass : depthUploadPass);
+
+                            const auto testName = "depth_stencil_format_change_" + dsFormatNames.at(origFormat) +
+                                                  "_to_" + dsFormatNames.at(resolveFormat) + "_upload_" +
+                                                  (uploadDepthFirst ? "depth" : "stencil") + "_first";
+                            constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                        }
+                    }
+            }
+            {
+                // Attachment index tests: simple test but the resolve pipeline uses a different att index.
+                // This will prevent the upload and resolve passes from being merged in dynamic rendering.
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R8G8B8A8_UNORM, 1u, true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(3u)),
+                    },
+                });
+
+                constructionGroup->addChild(new CustomResolveCase(testCtx, "att_index_change", params));
+
+                if (groupParams->renderingType == RENDERING_TYPE_DYNAMIC_RENDERING)
+                {
+                    params.locationRemapping = true;
+                    constructionGroup->addChild(new CustomResolveCase(testCtx, "att_index_change_with_remap", params));
+                }
+            }
+            {
+                // Different resolve format: simple test, but the resolve attachment has a different format.
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R16G16B16A16_UNORM, 0u, true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::AVERAGE, StrategyParams()),
+                    },
+                });
+
+                constructionGroup->addChild(new CustomResolveCase(testCtx, "format_change", params));
+
+                std::swap(params.attachmentList.back().attachmentFormat, params.attachmentList.back().resolveFormat);
+                constructionGroup->addChild(new CustomResolveCase(testCtx, "format_change_reverse", params));
+            }
+            {
+                // Complex case with multiple attachments, upload passes and resolves, including format and index changes.
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R16G16B16A16_UNORM, 1u, true, true);
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R16G16B16A16_UNORM, 0u, true, true);
+                params.uploadPasses.push_back(UploadPass{
+                    // Upload to top half.
+                    CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
+                     AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+                params.uploadPasses.push_back(UploadPass{
+                    // Upload to bottom half.
+                    CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, 0.0f)),
+                    {AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
+                     AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    // Resolving first attachment.
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(3u)),
+                    },
+                });
+                params.resolvePasses.push_back(ResolvePass{
+                    // Resolving the second attachment, partially.
+                    CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(1u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::AVERAGE, StrategyParams()),
+                    },
+                });
+
+                constructionGroup->addChild(
+                    new CustomResolveCase(testCtx, "color_multi_upload_multi_resolve_complex", params));
+
+                // Simplification of the previous case removing the format and index change.
+                for (uint32_t i = 0u; i < de::sizeU32(params.attachmentList); ++i)
+                {
+                    auto &attInfo           = params.attachmentList.at(i);
+                    attInfo.resolveFormat   = VK_FORMAT_R8G8B8A8_UNORM;
+                    attInfo.resolveLocation = i;
+                }
+
+                constructionGroup->addChild(
+                    new CustomResolveCase(testCtx, "color_multi_upload_multi_resolve_simple", params));
+            }
+            {
+                // More complex case mixing color and depth/stencil attachments, with multiple upload and resolve passes.
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R16G16B16A16_UNORM, 1u, true, true);
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                                                   VK_FORMAT_R8G8B8A8_UNORM, 2u, true, true);
+                params.attachmentList.emplace_back(VK_FORMAT_R16G16B16A16_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R8G8B8A8_UNORM, 0u, true, true);
+
+                // The last attachment will be depth/stencil, but the format will be chosen below.
+                params.attachmentList.emplace_back(VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_4_BIT, VK_FORMAT_UNDEFINED, 0u,
+                                                   true, true);
+
+                // Last color attachment.
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(2u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+
+                // Middle attachment. This needs to be separate because it's single-sampled.
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+
+                // First attachment together with depth/stencil.
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
+                        AttachmentIndexAspect(3u, 0u /*will be replaced below*/),
+                    },
+                });
+
+                // Resolve last attachment first.
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 1.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(2u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(1u)),
+                    },
+                });
+
+                // Finally, first and depth/stencil.
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(1.0f, 2.0f), tcu::Vec2(0.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(1u)),
+                        AttachmentResolve(3u, 0u /*will be replaced below*/, ResolveType::AVERAGE, StrategyParams()),
+                    },
+                });
+
+                // We want to test different formats for this test.
+                const std::vector<VkFormat> dsFormats{
+                    VK_FORMAT_D24_UNORM_S8_UINT,
+                    VK_FORMAT_D32_SFLOAT_S8_UINT,
+                };
+
+                // We'd like to test custom resolves for both depth/stencil as well as depth-only, for implementations that
+                // do not support VK_EXT_shader_stencil_export.
+                const std::vector<VkImageAspectFlags> dsAspects{
+                    (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT),
+                    VK_IMAGE_ASPECT_DEPTH_BIT,
+                };
+
+                for (const auto &format : dsFormats)
+                    for (const auto &aspects : dsAspects)
+                    {
+                        const auto nameSuffix = ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) == 0u ? "_no_stencil" : "");
+
+                        params.attachmentList.back().attachmentFormat = format;
+                        params.attachmentList.back().resolveFormat    = format;
+
+                        for (auto &pass : params.uploadPasses)
+                            for (auto &att : pass.attachments)
+                            {
+                                if ((att.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
+                                    att.aspects = aspects;
+                            }
+
+                        for (auto &pass : params.resolvePasses)
+                            for (auto &att : pass.attachmentResolves)
+                            {
+                                if ((att.attachment.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
+                                    att.attachment.aspects = aspects;
+                            }
+
+                        const auto testName = "mix_multi_upload_multi_resolve_" + dsFormatNames.at(format) + nameSuffix;
+                        constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                    }
+
+                // Now we swap the resolve passes and make the resolve attachment locations the identity, which should
+                // enable pass merging with dynamic rendering.
+                for (uint32_t i = 0u; i < de::sizeU32(params.attachmentList); ++i)
+                    params.attachmentList.at(i).resolveLocation = i;
+                std::swap(params.resolvePasses.front(), params.resolvePasses.back());
+
+                for (const auto &format : dsFormats)
+                    for (const auto &aspects : dsAspects)
+                    {
+                        const auto nameSuffix = ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) == 0u ? "_no_stencil" : "");
+
+                        params.attachmentList.back().attachmentFormat = format;
+                        params.attachmentList.back().resolveFormat    = format;
+
+                        for (auto &pass : params.uploadPasses)
+                            for (auto &att : pass.attachments)
+                            {
+                                if ((att.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
+                                    att.aspects = aspects;
+                            }
+
+                        for (auto &pass : params.resolvePasses)
+                            for (auto &att : pass.attachmentResolves)
+                            {
+                                if ((att.attachment.aspects & VK_IMAGE_ASPECT_COLOR_BIT) == 0u)
+                                    att.attachment.aspects = aspects;
+                            }
+
+                        const auto testName =
+                            "mix_multi_upload_multi_resolve_with_merge_" + dsFormatNames.at(format) + nameSuffix;
+                        constructionGroup->addChild(new CustomResolveCase(testCtx, testName, params));
+                    }
+            }
+            {
+                // Upload and resolve multiple color attachments at the same time, with and without remapping.
+                TestParams params;
+                params.groupParams = groupParams;
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R16G16B16A16_UNORM, 1u, true, true);
+                params.attachmentList.emplace_back(VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+                                                   VK_FORMAT_R8G8B8A8_UNORM, 2u, true, true);
+                params.attachmentList.emplace_back(VK_FORMAT_R16G16B16A16_UNORM, VK_SAMPLE_COUNT_4_BIT,
+                                                   VK_FORMAT_R8G8B8A8_UNORM, 0u, true, true);
+
+                // Middle attachment. This needs to be separate because it's single-sampled.
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {AttachmentIndexAspect(1u, VK_IMAGE_ASPECT_COLOR_BIT)},
+                });
+
+                // First and last color attachments.
+                params.uploadPasses.push_back(UploadPass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentIndexAspect(0u, VK_IMAGE_ASPECT_COLOR_BIT),
+                        AttachmentIndexAspect(2u, VK_IMAGE_ASPECT_COLOR_BIT),
+                    },
+                });
+
+                // Resolve both multisample attachments.
+                params.resolvePasses.push_back(ResolvePass{
+                    CoveredArea(tcu::Vec2(2.0f, 2.0f), tcu::Vec2(-1.0f, -1.0f)),
+                    {
+                        AttachmentResolve(0u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(2u)),
+                        AttachmentResolve(2u, VK_IMAGE_ASPECT_COLOR_BIT, ResolveType::SELECTED_SAMPLE,
+                                          StrategyParams(1u)),
+                    },
+                });
+
+                constructionGroup->addChild(
+                    new CustomResolveCase(testCtx, "color_upload_resolve_multi_attachment", params));
+
+                // Make the resolve attachment locations the identity, which should enable pass merging with dynamic
+                // rendering.
+                for (uint32_t i = 0u; i < de::sizeU32(params.attachmentList); ++i)
+                    params.attachmentList.at(i).resolveLocation = i;
+                constructionGroup->addChild(
+                    new CustomResolveCase(testCtx, "color_upload_resolve_multi_attachment_simple", params));
+            }
         }
 
         if (groupParams->renderingType == RENDERING_TYPE_DYNAMIC_RENDERING)
@@ -6531,7 +7018,7 @@ tcu::TestCaseGroup *createRenderPassCustomResolveTests(tcu::TestContext &testCtx
             }
         }
 
-        if (!origGroupParams->useSecondaryCmdBuffer)
+        if (origGroupParams->renderingType != RENDERING_TYPE_RENDERPASS2 && !origGroupParams->useSecondaryCmdBuffer)
         {
             for (const bool close : {false, true})
                 for (const bool large : {false, true})
@@ -6547,21 +7034,23 @@ tcu::TestCaseGroup *createRenderPassCustomResolveTests(tcu::TestContext &testCtx
                 }
         }
 
-        if (!origGroupParams->useSecondaryCmdBuffer)
+        if (origGroupParams->renderingType != RENDERING_TYPE_RENDERPASS_LEGACY &&
+            !origGroupParams->useSecondaryCmdBuffer)
         {
             for (const bool subsampledImages : {true, false})
                 for (const bool multiLayer : {false, true})
                     for (const bool multiView : {false, true})
+                    {
+                        if (multiLayer && multiView)
+                            continue;
+
+                        // Multiview cannot be used with shader objects.
+                        if (multiView && isConstructionTypeShaderObject(groupParams->pipelineConstructionType))
+                            continue;
+
                         for (const bool crInfoFragOutOnly : {false, true})
                             for (const bool emptyCrInfoFragShader : {false, true})
                             {
-                                if (multiLayer && multiView)
-                                    continue;
-
-                                // Multiview cannot be used with shader objects.
-                                if (multiView && isConstructionTypeShaderObject(groupParams->pipelineConstructionType))
-                                    continue;
-
                                 if ((groupParams->renderingType != RENDERING_TYPE_DYNAMIC_RENDERING ||
                                      !isConstructionTypeLibrary(groupParams->pipelineConstructionType)) &&
                                     (crInfoFragOutOnly || emptyCrInfoFragShader))
@@ -6569,24 +7058,51 @@ tcu::TestCaseGroup *createRenderPassCustomResolveTests(tcu::TestContext &testCtx
                                     continue;
                                 }
 
-                                const FDMParams params{
-                                    groupParams, subsampledImages,  multiLayer,
-                                    multiView,   crInfoFragOutOnly, emptyCrInfoFragShader,
-                                };
-                                const auto testName =
-                                    std::string("fdm") + (subsampledImages ? "_subsampled" : "_nonsubsampled") +
-                                    (multiLayer ? "_multilayer" : "") + (multiView ? "_multiview" : "") +
-                                    (crInfoFragOutOnly ? "_pre_resolve_info_frag_out_only" : "") +
-                                    (emptyCrInfoFragShader ? "_resolve_info_frag_shader_no_formats" : "");
-                                constructionGroup->addChild(new FDMCase(testCtx, testName, params));
+                                for (const bool largeFramebuffer : {false, true})
+                                    for (const bool useOffset : {false, true})
+                                    {
+                                        // We do not need many combinations for offsets. Trim some.
+                                        if (useOffset && (crInfoFragOutOnly || emptyCrInfoFragShader))
+                                            continue;
+
+                                        const FDMParams params{
+                                            // clang-format off
+                                            groupParams,
+                                            subsampledImages,
+                                            multiLayer,
+                                            multiView,
+                                            crInfoFragOutOnly,
+                                            emptyCrInfoFragShader,
+                                            largeFramebuffer,
+                                            useOffset,
+                                            // clang-format on
+                                        };
+
+                                        const auto testName =
+                                            std::string("fdm") + (subsampledImages ? "_subsampled" : "_nonsubsampled") +
+                                            (multiLayer ? "_multilayer" : "") + (multiView ? "_multiview" : "") +
+                                            (crInfoFragOutOnly ? "_pre_resolve_info_frag_out_only" : "") +
+                                            (emptyCrInfoFragShader ? "_resolve_info_frag_shader_no_formats" : "") +
+                                            (largeFramebuffer ? "_large_fb" : "") + (useOffset ? "_with_offset" : "");
+
+                                        constructionGroup->addChild(new FDMCase(testCtx, testName, params));
+                                    }
                             }
+                    }
+        }
+
+        if (origGroupParams->renderingType == RENDERING_TYPE_DYNAMIC_RENDERING &&
+            !origGroupParams->useSecondaryCmdBuffer)
+        {
+            addFunctionCaseWithPrograms(constructionGroup.get(), "single_sample_clear", SingleSampleClearCheckSupport,
+                                        SingleSampleClearInitPrograms, SingleSampleClearIterate, groupParams);
         }
 
         mainGroup->addChild(constructionGroup.release());
-    } // namespace renderpass
+    }
 
     return mainGroup.release();
-} // namespace vkt
+}
 
 } // namespace renderpass
 } // namespace vkt

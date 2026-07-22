@@ -49,9 +49,7 @@
 #include <limits>
 #include <iterator>
 
-namespace vkt
-{
-namespace synchronization
+namespace vkt::synchronization
 {
 namespace
 {
@@ -172,57 +170,31 @@ public:
         m_mutex.unlock();
     }
 
-    inline void setDevice(Move<VkDevice> device, const VkInstance &instance, const Context &context)
+    inline void setDevice(DeviceWrapper &&device)
     {
-        m_logicalDevice = device;
-#ifndef CTS_USES_VULKANSC
-        m_deviceDriver = de::MovePtr<DeviceDriver>(new DeviceDriver(context.getPlatformInterface(), instance,
-                                                                    *m_logicalDevice, context.getUsedApiVersion(),
-                                                                    context.getTestContext().getCommandLine()));
-#else
-        m_deviceDriver = de::MovePtr<DeviceDriverSC, DeinitDeviceDeleter>(
-            new DeviceDriverSC(context.getPlatformInterface(), instance, *m_logicalDevice,
-                               context.getTestContext().getCommandLine(), context.getResourceInterface(),
-                               context.getDeviceVulkanSC10Properties(), context.getDeviceProperties(),
-                               context.getUsedApiVersion()),
-            vk::DeinitDeviceDeleter(context.getResourceInterface().get(), *m_logicalDevice));
-#endif // CTS_USES_VULKANSC
+        m_logicalDevice = std::move(device);
     }
 
-    inline VkDevice getDevice(void)
+    inline VkDevice getDevice(void) const
     {
         return *m_logicalDevice;
     }
 
-    inline DeviceInterface &getDeviceInterface(void)
+    inline const DeviceInterface &getDeviceInterface(void) const
     {
-        return *m_deviceDriver;
+        return m_logicalDevice.getDriver();
     }
 
-    MovePtr<Allocator> m_allocator;
+    inline vk::Allocator &getAllocator(void) const
+    {
+        return m_logicalDevice.getAllocator();
+    }
 
 protected:
-    Move<VkDevice> m_logicalDevice;
-#ifndef CTS_USES_VULKANSC
-    de::MovePtr<vk::DeviceDriver> m_deviceDriver;
-#else
-    de::MovePtr<DeviceDriverSC, DeinitDeviceDeleter> m_deviceDriver;
-#endif // CTS_USES_VULKANSC
+    DeviceWrapper m_logicalDevice;
     map<uint32_t, Queues> m_queues;
     Mutex m_mutex;
 };
-
-MovePtr<Allocator> createAllocator(const InstanceInterface &vki, const VkPhysicalDevice physicalDevice,
-                                   MultiQueues &queues)
-{
-    const DeviceInterface &deviceInterface = queues.getDeviceInterface();
-    const VkDevice device                  = queues.getDevice();
-    const VkPhysicalDeviceMemoryProperties deviceMemoryProperties =
-        getPhysicalDeviceMemoryProperties(vki, physicalDevice);
-
-    // Create memory allocator for device
-    return MovePtr<Allocator>(new SimpleAllocator(deviceInterface, device, deviceMemoryProperties));
-}
 
 bool checkQueueFlags(const VkQueueFlags &availableFlag, const VkQueueFlags &neededFlag)
 {
@@ -240,10 +212,10 @@ bool checkQueueFlags(const VkQueueFlags &availableFlag, const VkQueueFlags &need
     return false;
 }
 
-MovePtr<MultiQueues> createQueues(Context &context, const VkQueueFlags &queueFlag, const VkInstance &instance,
-                                  const InstanceInterface &vki)
+MovePtr<MultiQueues> createQueues(const VkQueueFlags &queueFlag, const InstanceWrapper &instance)
 {
-    const VkPhysicalDevice physicalDevice = chooseDevice(vki, instance, context.getTestContext().getCommandLine());
+    const InstanceInterface &vki          = instance.getDriver();
+    const VkPhysicalDevice physicalDevice = instance.getPhysicalDevice();
     MovePtr<MultiQueues> moveQueues(new MultiQueues());
     MultiQueues &queues = *moveQueues;
     VkDeviceCreateInfo deviceInfo;
@@ -257,15 +229,9 @@ MovePtr<MultiQueues> createQueues(Context &context, const VkQueueFlags &queueFla
     for (uint32_t queuePropertiesNdx = 0; queuePropertiesNdx < queueFamilyProperties.size(); ++queuePropertiesNdx)
     {
         if (checkQueueFlags(queueFamilyProperties[queuePropertiesNdx].queueFlags, queueFlag))
-        {
             queues.addQueueFamilyIndex(queuePropertiesNdx, queueFamilyProperties[queuePropertiesNdx].queueCount);
-        }
     }
-
-    if (queues.countQueueFamilyIndex() == 0)
-    {
-        TCU_THROW(NotSupportedError, "Queue not found");
-    }
+    DE_ASSERT(queues.countQueueFamilyIndex());
 
     {
         vector<float>::iterator it = queuePriorities.begin();
@@ -300,47 +266,8 @@ MovePtr<MultiQueues> createQueues(Context &context, const VkQueueFlags &queueFla
     deMemset(&deviceInfo, 0, sizeof(deviceInfo));
     vki.getPhysicalDeviceFeatures(physicalDevice, &deviceFeatures);
 
-    void *pNext = nullptr;
-#ifdef CTS_USES_VULKANSC
-    VkDeviceObjectReservationCreateInfo memReservationInfo = context.getTestContext().getCommandLine().isSubProcess() ?
-                                                                 context.getResourceInterface()->getStatMax() :
-                                                                 resetDeviceObjectReservationCreateInfo();
-    memReservationInfo.pNext                               = pNext;
-    pNext                                                  = &memReservationInfo;
-
-    VkPhysicalDeviceVulkanSC10Features sc10Features = createDefaultSC10Features();
-    sc10Features.pNext                              = pNext;
-    pNext                                           = &sc10Features;
-
-    VkPipelineCacheCreateInfo pcCI;
-    std::vector<VkPipelinePoolSize> poolSizes;
-    if (context.getTestContext().getCommandLine().isSubProcess())
-    {
-        if (context.getResourceInterface()->getCacheDataSize() > 0)
-        {
-            pcCI = {
-                VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, // VkStructureType sType;
-                nullptr,                                      // const void* pNext;
-                VK_PIPELINE_CACHE_CREATE_READ_ONLY_BIT |
-                    VK_PIPELINE_CACHE_CREATE_USE_APPLICATION_STORAGE_BIT, // VkPipelineCacheCreateFlags flags;
-                context.getResourceInterface()->getCacheDataSize(),       // uintptr_t initialDataSize;
-                context.getResourceInterface()->getCacheData()            // const void* pInitialData;
-            };
-            memReservationInfo.pipelineCacheCreateInfoCount = 1;
-            memReservationInfo.pPipelineCacheCreateInfos    = &pcCI;
-        }
-
-        poolSizes = context.getResourceInterface()->getPipelinePoolSizes();
-        if (!poolSizes.empty())
-        {
-            memReservationInfo.pipelinePoolSizeCount = uint32_t(poolSizes.size());
-            memReservationInfo.pPipelinePoolSizes    = poolSizes.data();
-        }
-    }
-#endif // CTS_USES_VULKANSC
-
     deviceInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.pNext                   = pNext;
+    deviceInfo.pNext                   = nullptr;
     deviceInfo.enabledExtensionCount   = 0u;
     deviceInfo.ppEnabledExtensionNames = nullptr;
     deviceInfo.enabledLayerCount       = 0u;
@@ -349,10 +276,8 @@ MovePtr<MultiQueues> createQueues(Context &context, const VkQueueFlags &queueFla
     deviceInfo.queueCreateInfoCount    = static_cast<uint32_t>(queues.countQueueFamilyIndex());
     deviceInfo.pQueueCreateInfos       = &queueInfos[0];
 
-    queues.setDevice(createCustomDevice(context.getTestContext().getCommandLine().isValidationEnabled(),
-                                        context.getPlatformInterface(), instance, vki, physicalDevice, &deviceInfo),
-                     instance, context);
-    vk::DeviceInterface &vk = queues.getDeviceInterface();
+    queues.setDevice(instance.createCustomDevice(physicalDevice, &deviceInfo));
+    const vk::DeviceInterface &vk = queues.getDeviceInterface();
 
     for (uint32_t queueFamilyIndex = 0; queueFamilyIndex < queues.countQueueFamilyIndex(); ++queueFamilyIndex)
     {
@@ -368,7 +293,6 @@ MovePtr<MultiQueues> createQueues(Context &context, const VkQueueFlags &queueFla
         }
     }
 
-    queues.m_allocator = createAllocator(vki, physicalDevice, queues);
     return moveQueues;
 }
 
@@ -393,7 +317,7 @@ TestStatus executeComputePipeline(const Context &context, const VkPipeline &pipe
             DescriptorPoolBuilder()
                 .addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                 .build(vk, device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u));
-        Buffer resultBuffer(vk, device, *queues.m_allocator,
+        Buffer resultBuffer(vk, device, queues.getAllocator(),
                             makeBufferCreateInfo(BUFFER_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT),
                             MemoryRequirement::HostVisible);
         const VkBufferMemoryBarrier bufferBarrier = makeBufferMemoryBarrier(
@@ -476,7 +400,7 @@ TestStatus executeGraphicPipeline(const Context &context, const VkPipeline &pipe
                 .addType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
                 .build(vk, device, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1u));
         Move<VkDescriptorSet> descriptorSet = makeDescriptorSet(vk, device, *descriptorPool, descriptorSetLayout);
-        Buffer resultBuffer(vk, device, *queues.m_allocator,
+        Buffer resultBuffer(vk, device, queues.getAllocator(),
                             makeBufferCreateInfo(BUFFER_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT),
                             MemoryRequirement::HostVisible);
         const VkBufferMemoryBarrier bufferBarrier = makeBufferMemoryBarrier(
@@ -486,7 +410,7 @@ TestStatus executeGraphicPipeline(const Context &context, const VkPipeline &pipe
         const VkImageSubresourceRange colorImageSubresourceRange =
             makeImageSubresourceRange(VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u);
         de::MovePtr<Image> colorAttachmentImage = de::MovePtr<Image>(new Image(
-            vk, device, *queues.m_allocator,
+            vk, device, queues.getAllocator(),
             makeImageCreateInfo(VK_IMAGE_TYPE_2D, colorImageExtent, colorFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                 VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL),
             MemoryRequirement::Any));
@@ -788,14 +712,13 @@ public:
 #ifdef CTS_USES_VULKANSC
         MultithreadedDestroyGuard mdGuard(m_context.getResourceInterface());
 #endif // CTS_USES_VULKANSC
-        const CustomInstance instance(createCustomInstanceFromContext(m_context));
-        const InstanceDriver &instanceDriver(instance.getDriver());
+        const InstanceWrapper instance(createCustomInstanceFromContext(m_context));
 
-        MovePtr<MultiQueues> queues          = createQueues(m_context, VK_QUEUE_COMPUTE_BIT, instance, instanceDriver);
+        MovePtr<MultiQueues> queues          = createQueues(VK_QUEUE_COMPUTE_BIT, instance);
         const DeviceInterface &vk            = queues->getDeviceInterface();
         const VkDevice device                = queues->getDevice();
         ShaderModuleVector shaderCompModules = addShaderModules(vk, device);
-        Buffer resultBuffer(vk, device, *queues->m_allocator,
+        Buffer resultBuffer(vk, device, queues->getAllocator(),
                             makeBufferCreateInfo(BUFFER_SIZE, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT),
                             MemoryRequirement::HostVisible);
         const Move<VkDescriptorSetLayout> descriptorSetLayout(
@@ -921,13 +844,9 @@ public:
 #ifdef CTS_USES_VULKANSC
         MultithreadedDestroyGuard mdGuard(m_context.getResourceInterface());
 #endif // CTS_USES_VULKANSC
-        const CustomInstance instance(createCustomInstanceFromContext(m_context));
-        const InstanceDriver &instanceDriver(instance.getDriver());
-        const VkPhysicalDevice physicalDevice =
-            chooseDevice(instanceDriver, instance, m_context.getTestContext().getCommandLine());
-        requireFeatures(instanceDriver, physicalDevice, FEATURE_VERTEX_PIPELINE_STORES_AND_ATOMICS);
+        const InstanceWrapper instance(createCustomInstanceFromContext(m_context));
 
-        MovePtr<MultiQueues> queues   = createQueues(m_context, VK_QUEUE_GRAPHICS_BIT, instance, instanceDriver);
+        MovePtr<MultiQueues> queues   = createQueues(VK_QUEUE_GRAPHICS_BIT, instance);
         const VkDevice device         = queues->getDevice();
         const DeviceInterface &vk     = queues->getDeviceInterface();
         VkFormat colorFormat          = VK_FORMAT_R8G8B8A8_UNORM;
@@ -1177,11 +1096,32 @@ private:
     VkPipelineDepthStencilStateCreateInfo m_depthStencilStateParams;
 };
 
+void requireQueueFamilies(const InstanceInterface &vki, VkPhysicalDevice physicalDevice, const VkQueueFlags &queueFlag)
+{
+    auto queueFamilyProperties = getPhysicalDeviceQueueFamilyProperties(vki, physicalDevice);
+
+    // make sure there is a queue family that supports the requested queue flags
+    for (auto &queue : queueFamilyProperties)
+    {
+        if (checkQueueFlags(queue.queueFlags, queueFlag))
+            return;
+    }
+
+    TCU_THROW(NotSupportedError, "Queue not found");
+}
+
 class PipelineCacheComputeTest : public TestCase
 {
 public:
     PipelineCacheComputeTest(TestContext &testCtx, const string &name) : TestCase(testCtx, name)
     {
+    }
+
+    void checkSupport(Context &context) const
+    {
+        auto &vki           = context.getInstanceInterface();
+        auto physicalDevice = context.getPhysicalDevice();
+        requireQueueFamilies(vki, physicalDevice, VK_QUEUE_COMPUTE_BIT);
     }
 
     void initPrograms(SourceCollections &programCollection) const
@@ -1249,6 +1189,14 @@ class PipelineCacheGraphicTest : public TestCase
 public:
     PipelineCacheGraphicTest(TestContext &testCtx, const string &name) : TestCase(testCtx, name)
     {
+    }
+
+    void checkSupport(Context &context) const
+    {
+        auto &vki           = context.getInstanceInterface();
+        auto physicalDevice = context.getPhysicalDevice();
+        requireFeatures(vki, physicalDevice, FEATURE_VERTEX_PIPELINE_STORES_AND_ATOMICS);
+        requireQueueFamilies(vki, physicalDevice, VK_QUEUE_GRAPHICS_BIT);
     }
 
     void initPrograms(SourceCollections &programCollection) const
@@ -1342,5 +1290,4 @@ tcu::TestCaseGroup *createInternallySynchronizedObjects(tcu::TestContext &testCt
     return tests.release();
 }
 
-} // namespace synchronization
-} // namespace vkt
+} // namespace vkt::synchronization

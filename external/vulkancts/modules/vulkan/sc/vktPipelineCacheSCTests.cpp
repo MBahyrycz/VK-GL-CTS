@@ -103,10 +103,9 @@ void createShaders(SourceCollections &dst, TestParams params)
 tcu::TestStatus createPipelineCacheTest(Context &context, TestParams testParams)
 {
     const vk::PlatformInterface &vkp = context.getPlatformInterface();
-    const CustomInstance instance(createCustomInstanceFromContext(context));
-    const InstanceDriver &instanceDriver(instance.getDriver());
-    const VkPhysicalDevice physicalDevice =
-        chooseDevice(instanceDriver, instance, context.getTestContext().getCommandLine());
+    const InstanceWrapper instance(createCustomInstanceFromContext(context));
+    const InstanceInterface &instanceDriver(instance.getDriver());
+    const VkPhysicalDevice physicalDevice = instance.getPhysicalDevice();
 
     std::string graphicsPID = "PCST_GRAPHICS";
     std::string computePID  = "PCST_COMPUTE";
@@ -319,18 +318,10 @@ tcu::TestStatus createPipelineCacheTest(Context &context, TestParams testParams)
     deviceCreateInfo.pNext = pNext;
 
     tcu::TestStatus testStatus = tcu::TestStatus::pass("Pass");
-    Move<VkDevice> device;
+    DeviceWrapper device;
     {
-        std::vector<const char *> enabledLayers;
-
-        if (deviceCreateInfo.enabledLayerCount == 0u && context.getTestContext().getCommandLine().isValidationEnabled())
-        {
-            enabledLayers                        = getValidationLayers(instanceDriver, physicalDevice);
-            deviceCreateInfo.enabledLayerCount   = static_cast<uint32_t>(enabledLayers.size());
-            deviceCreateInfo.ppEnabledLayerNames = (enabledLayers.empty() ? nullptr : enabledLayers.data());
-        }
-        VkDevice object = VK_NULL_HANDLE;
-        VkResult result = instanceDriver.createDevice(physicalDevice, &deviceCreateInfo, nullptr, &object);
+        UncheckedDevice object;
+        VkResult result = instance.createUncheckedDevice(physicalDevice, &deviceCreateInfo, nullptr, &object);
         switch (testParams.type)
         {
         case PCTT_WRONG_VENDOR_ID:
@@ -343,7 +334,7 @@ tcu::TestStatus createPipelineCacheTest(Context &context, TestParams testParams)
         }
         if (result != VK_SUCCESS)
             return testStatus;
-        device = Move<VkDevice>(check<VkDevice>(object), Deleter<VkDevice>(vkp, instance, object, nullptr));
+        device = std::move(object);
     }
 
     // create our own pipeline cache in subprocess. Use VK functions directly

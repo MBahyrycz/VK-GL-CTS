@@ -72,6 +72,7 @@ namespace opt
 {
 
 DE_DECLARE_COMMAND_LINE_OPT(CasePath, std::string);
+DE_DECLARE_COMMAND_LINE_OPT(ExcludeCasePath, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(CaseList, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(CaseListFile, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(CaseListResource, std::string);
@@ -79,7 +80,10 @@ DE_DECLARE_COMMAND_LINE_OPT(StdinCaseList, bool);
 DE_DECLARE_COMMAND_LINE_OPT(LogFilename, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(RunMode, tcu::RunMode);
 DE_DECLARE_COMMAND_LINE_OPT(ExportFilenamePattern, std::string);
+DE_DECLARE_COMMAND_LINE_OPT(MustpassSpec, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(WatchDog, bool);
+DE_DECLARE_COMMAND_LINE_OPT(WatchDogTotalTime, int);
+DE_DECLARE_COMMAND_LINE_OPT(WatchDogIntervalTime, int);
 DE_DECLARE_COMMAND_LINE_OPT(CrashHandler, bool);
 DE_DECLARE_COMMAND_LINE_OPT(BaseSeed, int);
 DE_DECLARE_COMMAND_LINE_OPT(TestIterationCount, int);
@@ -144,10 +148,10 @@ DE_DECLARE_COMMAND_LINE_OPT(PipelineCompilerFilePrefix, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(VkLibraryPath, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(ApplicationParametersInputFile, std::string);
 DE_DECLARE_COMMAND_LINE_OPT(QuietStdout, bool);
-DE_DECLARE_COMMAND_LINE_OPT(ComputeOnly, bool);
 DE_DECLARE_COMMAND_LINE_OPT(VideoLogPrint, bool);
 DE_DECLARE_COMMAND_LINE_OPT(VideoDecodeOutputDump, VideoDecodeOutput);
 DE_DECLARE_COMMAND_LINE_OPT(VideoEncodeOutputDump, VideoEncodeOutput);
+DE_DECLARE_COMMAND_LINE_OPT(VendorSpecific, bool);
 
 static void parseIntList(const char *src, std::vector<int> *dst)
 {
@@ -172,7 +176,10 @@ void registerOptions(de::cmdline::Parser &parser)
                                                                         {"xml-caselist", RUNMODE_DUMP_XML_CASELIST},
                                                                         {"txt-caselist", RUNMODE_DUMP_TEXT_CASELIST},
                                                                         {"stdout-caselist", RUNMODE_DUMP_STDOUT_CASELIST},
-                                                                        {"amber-verify", RUNMODE_VERIFY_AMBER_COHERENCY}};
+                                                                        {"amber-verify", RUNMODE_VERIFY_AMBER_COHERENCY},
+                                                                        {"txt-trie", RUNMODE_DUMP_TEXT_TRIE},
+                                                                        {"stdout-trie", RUNMODE_DUMP_STDOUT_TRIE},
+                                                                        {"gen-mustpass", RUNMODE_GEN_MUSTPASS}};
     static const NamedValue<WindowVisibility> s_visibilites[]        = {{"windowed", WINDOWVISIBILITY_WINDOWED},
                                                                         {"fullscreen", WINDOWVISIBILITY_FULLSCREEN},
                                                                         {"hidden", WINDOWVISIBILITY_HIDDEN}};
@@ -209,6 +216,9 @@ void registerOptions(de::cmdline::Parser &parser)
         << Option<CasePath>("n", "deqp-case",
                             "Test case(s) to run, supports wildcards (e.g. dEQP-GLES2.info.*) and commas to separate "
                             "multiple patterns")
+        << Option<ExcludeCasePath>("e", "deqp-exclude-case",
+                                   "Test case(s) to exclude, supports wildcards (e.g. dEQP-GLES2.info.*) and commas to "
+                                   "separate multiple patterns")
         << Option<CaseListFile>("f", "deqp-caselist-file", "Read case list (in trie format) from given file")
         << Option<CaseList>(nullptr, "deqp-caselist",
                             "Case list to run in trie format (e.g. {dEQP-GLES2{info{version,renderer}}})")
@@ -222,7 +232,15 @@ void registerOptions(de::cmdline::Parser &parser)
         << Option<ExportFilenamePattern>(nullptr, "deqp-caselist-export-file",
                                          "Set the target file name pattern for caselist export",
                                          "${packageName}-cases.${typeExtension}")
+        << Option<MustpassSpec>(nullptr, "deqp-mustpass-spec",
+                                "Path to a mustpass spec file describing per-configuration filters and outputs "
+                                "(used with --deqp-runmode=gen-mustpass)",
+                                "")
         << Option<WatchDog>(nullptr, "deqp-watchdog", "Enable test watchdog", s_enableNames, "disable")
+        << Option<WatchDogTotalTime>(nullptr, "deqp-watchdog-total-time-limit", "Total test case time limit in seconds",
+                                     "300")
+        << Option<WatchDogIntervalTime>(nullptr, "deqp-watchdog-interval-time-limit",
+                                        "Per iteration time limit in seconds", "30")
         << Option<CrashHandler>(nullptr, "deqp-crashhandler", "Enable crash handling", s_enableNames, "disable")
         << Option<BaseSeed>(nullptr, "deqp-base-seed", "Base seed for test cases that use randomization", "0")
         << Option<TestIterationCount>(nullptr, "deqp-test-iteration-count",
@@ -271,11 +289,11 @@ void registerOptions(de::cmdline::Parser &parser)
         << Option<LogFlush>(nullptr, "deqp-log-flush", "Enable or disable log file fflush", s_enableNames, "enable")
         << Option<LogCompact>(nullptr, "deqp-log-compact", "Enable or disable the compact version of the log",
                               s_enableNames, "disable")
-        << Option<Validation>(nullptr, "deqp-validation", "Enable or disable test case validation", s_enableNames,
+        << Option<Validation>(nullptr, "deqp-vk-validation", "Enable or disable test case validation", s_enableNames,
                               "disable")
         << Option<SpirvValidation>(nullptr, "deqp-spirv-validation", "Enable or disable spir-v shader validation",
                                    s_enableNames, SPIRV_VALIDATION_DEFAULT)
-        << Option<PrintValidationErrors>(nullptr, "deqp-print-validation-errors",
+        << Option<PrintValidationErrors>(nullptr, "deqp-vk-print-validation-errors",
                                          "Print validation errors to standard error")
         << Option<DuplicateCheck>(nullptr, "deqp-duplicate-case-name-check",
                                   "Check for duplicate case names when creating test hierarchy", s_enableNames,
@@ -342,16 +360,14 @@ void registerOptions(de::cmdline::Parser &parser)
                                  "Path to Vulkan library (e.g. loader library vulkan-1.dll)", "")
         << Option<ApplicationParametersInputFile>(nullptr, "deqp-app-params-input-file",
                                                   "File that provides a default set of application parameters")
-        << Option<ComputeOnly>(nullptr, "deqp-compute-only",
-                               "Perform tests for devices implementing compute-only functionality", s_enableNames,
-                               "disable")
         << Option<VideoLogPrint>(nullptr, "deqp-vk-video-log-print", "Print log messages of vulkan video tests",
                                  s_enableNames, "disable")
         << Option<VideoDecodeOutputDump>(nullptr, "deqp-vk-video-decode-dump",
                                          "Dump the output of vulkan video decoding tests", s_videoDecodeDump, "disable")
         << Option<VideoEncodeOutputDump>(nullptr, "deqp-vk-video-encode-dump",
-                                         "Dump the output of vulkan video encoding tests", s_videoEncodeDump,
-                                         "disable");
+                                         "Dump the output of vulkan video encoding tests", s_videoEncodeDump, "disable")
+        << Option<VendorSpecific>(nullptr, "deqp-vk-vendor-specific", "Allows you to use vendor-specific configuration",
+                                  s_enableNames, "disable");
 }
 
 void registerLegacyOptions(de::cmdline::Parser &parser)
@@ -720,14 +736,14 @@ static void parseSimpleCaseList(vector<CaseTreeNode *> &nodeStack, std::istream 
     string line;
 
     // Outer loop to iterate every line.
-    for (;;)
+    while (in.good())
     {
-        if (!in)
+        std::getline(in, line);
+        if (in.fail())
             break;
 
-        std::getline(in, line);
         trimString(line);
-        if (line.empty())
+        if (line.empty() || line.front() == '#') // Ignore empty lines and comments.
             continue;
 
         std::istringstream inputLine(line);
@@ -840,6 +856,10 @@ static void parseGroupFile(CaseTreeNode *root, std::istream &inGroupList, const 
 
     while (std::getline(namesStream, fileName))
     {
+        trimString(fileName);
+        if (fileName.empty() || fileName.front() == '#') // Ignore empty lines and comments.
+            continue;
+
         de::FilePath groupPath(fileName);
         de::UniquePtr<Resource> groupResource(archive.getResource(groupPath.normalize().getPath()));
         const int groupBufferSize(groupResource->getSize());
@@ -872,10 +892,15 @@ static CaseTreeNode *parseCaseList(std::istream &in, const tcu::Archive &archive
             bool readGroupFile = false;
             if (path)
             {
-                // read the first line and make sure it doesn't contain '\r'
+                // read the first non-empty non-comment line and make sure it doesn't contain '\r'
                 std::string line;
-                std::getline(in, line);
-                line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+                while (std::getline(in, line))
+                {
+                    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
+                    trimString(line);
+                    if (!(line.empty() || line.front() == '#')) // Ignore empty lines and comments.
+                        break;
+                }
 
                 const std::string ending = ".txt";
                 readGroupFile =
@@ -1227,6 +1252,10 @@ const char *CommandLine::getCaseListExportFile(void) const
 {
     return m_cmdLine.getOption<opt::ExportFilenamePattern>().c_str();
 }
+const char *CommandLine::getMustpassSpec(void) const
+{
+    return m_cmdLine.getOption<opt::MustpassSpec>().c_str();
+}
 WindowVisibility CommandLine::getVisibility(void) const
 {
     return m_cmdLine.getOption<opt::Visibility>();
@@ -1234,6 +1263,14 @@ WindowVisibility CommandLine::getVisibility(void) const
 bool CommandLine::isWatchDogEnabled(void) const
 {
     return m_cmdLine.getOption<opt::WatchDog>();
+}
+int CommandLine::getWatchDogTotalTime(void) const
+{
+    return m_cmdLine.getOption<opt::WatchDogTotalTime>();
+}
+int CommandLine::getWatchDogIntervalTime(void) const
+{
+    return m_cmdLine.getOption<opt::WatchDogIntervalTime>();
 }
 bool CommandLine::isCrashHandlingEnabled(void) const
 {
@@ -1391,9 +1428,9 @@ int CommandLine::getPipelineDefaultSize(void) const
 {
     return m_cmdLine.getOption<opt::PipelineDefaultSize>();
 }
-bool CommandLine::isComputeOnly(void) const
+bool CommandLine::isVendorSpecific() const
 {
-    return m_cmdLine.getOption<opt::ComputeOnly>();
+    return m_cmdLine.getOption<opt::VendorSpecific>();
 }
 
 const char *CommandLine::getGLContextType(void) const
@@ -1586,9 +1623,13 @@ bool CaseListFilter::checkTestCaseName(const char *caseName) const
     else if (m_caseTree)
         result = tcu::checkTestCaseName(m_caseTree, caseName);
     else
-        return true;
+        result = true;
     if (!result && m_caseFractionMandatoryTests.get() != nullptr)
         result = m_caseFractionMandatoryTests->matches(caseName, false);
+
+    if (result && m_excludePaths && m_excludePaths->matches(caseName, false))
+        result = false;
+
     return result;
 }
 
@@ -1671,6 +1712,9 @@ CaseListFilter::CaseListFilter(const de::cmdline::CommandLine &cmdLine, const tc
     }
     else if (cmdLine.hasOption<opt::CasePath>())
         m_casePaths = de::MovePtr<const CasePaths>(new CasePaths(cmdLine.getOption<opt::CasePath>()));
+
+    if (cmdLine.hasOption<opt::ExcludeCasePath>())
+        m_excludePaths = de::MovePtr<const CasePaths>(new CasePaths(cmdLine.getOption<opt::ExcludeCasePath>()));
 
     if (!cmdLine.getOption<opt::SubProcess>())
         m_caseFraction = cmdLine.getOption<opt::CaseFraction>();

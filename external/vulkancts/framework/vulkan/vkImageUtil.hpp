@@ -132,6 +132,7 @@ uint32_t getFormatComponentWidth(const VkFormat format, const uint32_t component
 uint32_t getBlockSizeInBytes(const VkFormat compressedFormat);
 uint32_t getBlockWidth(const VkFormat compressedFormat);
 uint32_t getBlockHeight(const VkFormat compressedFormat);
+uint32_t getBlockDepth(const VkFormat compressedFormat);
 
 bool hasSpirvFormat(VkFormat fmt);
 const std::string getSpirvFormat(VkFormat fmt);
@@ -214,6 +215,8 @@ bool isYCbCrFormat(VkFormat format);
 bool isYCbCrExtensionFormat(VkFormat format);
 bool isYCbCrConversionFormat(VkFormat format);
 bool isPvrtcFormat(VkFormat format);
+bool isAstc3DFormat(VkFormat format);
+bool isAstcHdrFormat(VkFormat format);
 bool isPvrtc1Format(VkFormat format);
 PlanarFormatDescription getPlanarFormatDescription(VkFormat format);
 int getPlaneCount(VkFormat format);
@@ -384,7 +387,7 @@ void allocateAndBindSparseImage(const vk::DeviceInterface &vk, vk::VkDevice devi
                                 const vk::VkImageCreateInfo &imageCreateInfo, const vk::VkSemaphore &signalSemaphore,
                                 vk::VkQueue queue, vk::Allocator &allocator,
                                 std::vector<de::SharedPtr<vk::Allocation>> &allocations, tcu::TextureFormat format,
-                                vk::VkImage destImage);
+                                vk::VkImage destImage, vk::VkFence fence = VK_NULL_HANDLE);
 #endif // CTS_USES_VULKANSC
 } // namespace vk
 

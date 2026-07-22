@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "vktDescriptorSetsIndexingTests.hpp"
+#include "vktDescriptorIndexingMiscTests.hpp"
 #include "vktTestCaseUtil.hpp"
 
 #include "vkBuilderUtil.hpp"
@@ -214,7 +215,7 @@ uint32_t getMinimalRequiredDescriptorCount(VkDescriptorType descriptorType)
     return minRequiredCount.at(descriptorType);
 }
 
-class CommonDescriptorInstance : public TestInstance
+class CommonDescriptorInstance : public MultiQueueRunnerTestInstance
 {
 public:
     CommonDescriptorInstance(Context &context, const TestParams &testParams);
@@ -358,15 +359,17 @@ public:
     virtual bool verifyVertexWriteResults(IterateCommonVariables &variables);
 
 protected:
-    virtual tcu::TestStatus iterate(void);
+    tcu::TestStatus queuePass(const QueueData &queueData) override;
 
 protected:
+    void resetForQueuePass(const QueueData &queueData);
+
     const VkDevice m_vkd;
     const DeviceInterface &m_vki;
     Allocator &m_allocator;
-    const VkQueue m_queue;
-    const uint32_t m_queueFamilyIndex;
-    const Move<VkCommandPool> m_commandPool;
+    VkQueue m_queue;
+    uint32_t m_queueFamilyIndex;
+    Move<VkCommandPool> m_commandPool;
     const VkFormat m_colorFormat;
     const TestParams m_testParams;
     static const tcu::Vec4 m_clearColor;
@@ -409,6 +412,7 @@ void DescriptorEnumerator::init(const vkt::Context &context, uint32_t vertexCoun
 
     bufferSize = ut::createBufferAndBind(buffer, context, VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT, dataSize);
     deMemcpy(buffer->alloc->getHostPtr(), data.data(), static_cast<size_t>(dataSize));
+    vk::flushAlloc(context.getDeviceInterface(), context.getDevice(), *buffer->alloc);
 
     const VkBufferViewCreateInfo bufferViewCreateInfo = {
         VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, // sType
@@ -480,7 +484,8 @@ void DescriptorEnumerator::update(const vkt::Context &context)
 }
 
 CommonDescriptorInstance::CommonDescriptorInstance(Context &context, const TestParams &testParams)
-    : TestInstance(context)
+    : MultiQueueRunnerTestInstance(context, (testParams.stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) ? COMPUTE_QUEUE :
+                                                                                                    GRAPHICS_QUEUE)
     , m_vkd(context.getDevice())
     , m_vki(context.getDeviceInterface())
     , m_allocator(context.getDefaultAllocator())
@@ -494,6 +499,15 @@ CommonDescriptorInstance::CommonDescriptorInstance(Context &context, const TestP
     , m_colorScheme(createColorScheme())
     , m_schemeSize(static_cast<uint32_t>(m_colorScheme.size()))
 {
+}
+
+void CommonDescriptorInstance::resetForQueuePass(const QueueData &queueData)
+{
+    m_queue            = queueData.handle;
+    m_queueFamilyIndex = queueData.familyIndex;
+    m_commandPool      = vk::createCommandPool(
+        m_vki, m_vkd, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        m_queueFamilyIndex);
 }
 
 uint32_t CommonDescriptorInstance::computeAvailableDescriptorCount(VkDescriptorType descriptorType,
@@ -1378,8 +1392,10 @@ void CommonDescriptorInstance::iterateCommandBegin(IterateCommonVariables &varia
     commandBindPipeline(*variables.commandBuffer, *variables.pipeline);
 }
 
-tcu::TestStatus CommonDescriptorInstance::iterate(void)
+tcu::TestStatus CommonDescriptorInstance::queuePass(const QueueData &queueData)
 {
+    resetForQueuePass(queueData);
+
     IterateCommonVariables v;
     ut::UpdatablePixelBufferAccessPtr programResult;
     ut::UpdatablePixelBufferAccessPtr referenceResult;
@@ -3238,8 +3254,8 @@ public:
     }
 
 protected:
-    virtual tcu::TestStatus iterate(void);
-    virtual void updateDescriptors(IterateCommonVariables &variables);
+    tcu::TestStatus queuePass(const QueueData &queueData) override;
+    virtual void updateDescriptors(IterateCommonVariables &variables) override;
 };
 
 void DynamicBuffersInstance::updateDescriptors(IterateCommonVariables &variables)
@@ -3285,8 +3301,10 @@ void DynamicBuffersInstance::updateDescriptors(IterateCommonVariables &variables
     }
 }
 
-tcu::TestStatus DynamicBuffersInstance::iterate(void)
+tcu::TestStatus DynamicBuffersInstance::queuePass(const QueueData &queueData)
 {
+    resetForQueuePass(queueData);
+
     IterateCommonVariables v;
     iterateCommandSetup(v);
 
@@ -3364,26 +3382,30 @@ class DynamicStorageBufferInstance : public DynamicBuffersInstance, public Stora
 {
 public:
     DynamicStorageBufferInstance(Context &context, const TestCaseParams &testCaseParams);
-    tcu::TestStatus iterate(void) override;
+    tcu::TestStatus queuePass(const QueueData &queueData) override;
     void createAndPopulateDescriptors(IterateCommonVariables &variables) override;
     void createAndPopulateUnusedDescriptors(IterateCommonVariables &variables) override;
     void updateDescriptors(IterateCommonVariables &variables) override;
     bool verifyVertexWriteResults(IterateCommonVariables &variables) override;
+
+    inline static TestParams makeDynamicStorageBufferTestParams(Context &context, const TestCaseParams &testCaseParams)
+    {
+        return TestParams(VK_SHADER_STAGE_ALL_GRAPHICS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
+                          VK_DESCRIPTOR_TYPE_UNDEFINED, false,
+                          performWritesInVertex(testCaseParams.descriptorType, context), testCaseParams);
+    }
 };
 
 DynamicStorageBufferInstance::DynamicStorageBufferInstance(Context &context, const TestCaseParams &testCaseParams)
-    : CommonDescriptorInstance(
-          context, TestParams(VK_SHADER_STAGE_ALL_GRAPHICS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
-                              VK_DESCRIPTOR_TYPE_UNDEFINED, false,
-                              performWritesInVertex(testCaseParams.descriptorType, context), testCaseParams))
-    , DynamicBuffersInstance(context, m_testParams)
+    : CommonDescriptorInstance(context, makeDynamicStorageBufferTestParams(context, testCaseParams))
+    , DynamicBuffersInstance(context, makeDynamicStorageBufferTestParams(context, testCaseParams))
     , StorageBufferInstance(context, testCaseParams)
 {
 }
 
-tcu::TestStatus DynamicStorageBufferInstance::iterate(void)
+tcu::TestStatus DynamicStorageBufferInstance::queuePass(const QueueData &queueData)
 {
-    return DynamicBuffersInstance::iterate();
+    return DynamicBuffersInstance::queuePass(queueData);
 }
 
 void DynamicStorageBufferInstance::createAndPopulateDescriptors(IterateCommonVariables &variables)
@@ -3410,25 +3432,29 @@ class DynamicUniformBufferInstance : public DynamicBuffersInstance, public Unifo
 {
 public:
     DynamicUniformBufferInstance(Context &context, const TestCaseParams &testCaseParams);
-    tcu::TestStatus iterate(void) override;
+    tcu::TestStatus queuePass(const QueueData &queueData) override;
     void createAndPopulateDescriptors(IterateCommonVariables &variables) override;
     void createAndPopulateUnusedDescriptors(IterateCommonVariables &variables) override;
     void updateDescriptors(IterateCommonVariables &variables) override;
+
+    inline TestParams makeDynamicUniformBufferTestParams(Context &context, const TestCaseParams &testCaseParams)
+    {
+        return TestParams(VK_SHADER_STAGE_ALL_GRAPHICS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                          VK_DESCRIPTOR_TYPE_UNDEFINED, false,
+                          performWritesInVertex(testCaseParams.descriptorType, context), testCaseParams);
+    }
 };
 
 DynamicUniformBufferInstance::DynamicUniformBufferInstance(Context &context, const TestCaseParams &testCaseParams)
-    : CommonDescriptorInstance(
-          context, TestParams(VK_SHADER_STAGE_ALL_GRAPHICS, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                              VK_DESCRIPTOR_TYPE_UNDEFINED, false,
-                              performWritesInVertex(testCaseParams.descriptorType, context), testCaseParams))
-    , DynamicBuffersInstance(context, m_testParams)
+    : CommonDescriptorInstance(context, makeDynamicUniformBufferTestParams(context, testCaseParams))
+    , DynamicBuffersInstance(context, makeDynamicUniformBufferTestParams(context, testCaseParams))
     , UniformBufferInstance(context, testCaseParams)
 {
 }
 
-tcu::TestStatus DynamicUniformBufferInstance::iterate(void)
+tcu::TestStatus DynamicUniformBufferInstance::queuePass(const QueueData &queueData)
 {
-    return DynamicBuffersInstance::iterate();
+    return DynamicBuffersInstance::queuePass(queueData);
 }
 
 void DynamicUniformBufferInstance::createAndPopulateDescriptors(IterateCommonVariables &variables)
@@ -4045,7 +4071,7 @@ public:
     StorageImageInstance(Context &context, const TestCaseParams &testCaseParams);
 
 private:
-    tcu::TestStatus iterate(void) override;
+    tcu::TestStatus queuePass(const QueueData &queueData) override;
     void createAndPopulateDescriptors(IterateCommonVariables &variables) override;
     void createAndPopulateUnusedDescriptors(IterateCommonVariables &variables) override;
     void updateDescriptors(IterateCommonVariables &variables) override;
@@ -4154,8 +4180,10 @@ void StorageImageInstance::createAndPopulateUnusedDescriptors(IterateCommonVaria
     createImagesViews(variables.unusedDescriptorImageViews, variables.unusedDescriptorsImages, imageFormat);
 }
 
-tcu::TestStatus StorageImageInstance::iterate(void)
+tcu::TestStatus StorageImageInstance::queuePass(const QueueData &queueData)
 {
+    resetForQueuePass(queueData);
+
     IterateCommonVariables v;
     iterateCommandSetup(v);
     iterateCommandBegin(v);
@@ -4909,6 +4937,8 @@ void descriptorIndexingDescriptorSetsCreateTests(tcu::TestCaseGroup *group)
 
     addFunctionCaseWithPrograms(group, "non_uniform_atomics", nonUniformAtomicsCheckSupport, nonUniformAtomicsPrograms,
                                 nonUniformAtomicsRun);
+
+    createDescriptorIndexingMiscTests(group);
 }
 
 } // namespace DescriptorIndexing

@@ -74,7 +74,7 @@ include_directories(
 	device_group
 	compute
 	image
-        image_processing
+	image_processing
 	wsi
 	sparse_resources
 	tessellation
@@ -105,16 +105,27 @@ include_directories(
 	reconvergence
 	mesh_shader
 	fragment_shading_barycentric
-	video
 	cooperative_vector
 	${DEQP_INL_DIR}
 	sc
-	video
 	shader_object
 	device_generated_commands
 	tensor
 	data_graph
 	)
+
+include_directories(video)
+
+set(DEQP_VK_VKSC_CUSTOM_INSTANCES_DEVICES_UTIL_SRCS
+	vktCustomInstancesDevices.cpp
+	vktCustomInstancesDevices.hpp
+	)
+
+add_library(deqp-vk-custom-instances-devices-util STATIC ${DEQP_VK_VKSC_CUSTOM_INSTANCES_DEVICES_UTIL_SRCS})
+target_link_libraries(deqp-vk-custom-instances-devices-util tcutil vkutil deqp-vk-video-config)
+
+add_library(deqp-vksc-custom-instances-devices-util STATIC ${DEQP_VK_VKSC_CUSTOM_INSTANCES_DEVICES_UTIL_SRCS})
+target_link_libraries(deqp-vksc-custom-instances-devices-util PUBLIC deqp-vksc-util tcutil vkscutil)
 
 set(DEQP_VK_SRCS
 	vktTestCaseDefs.hpp
@@ -130,8 +141,6 @@ set(DEQP_VK_SRCS
 	vktTestGroupUtil.hpp
 	vktInfoTests.cpp
 	vktInfoTests.hpp
-	vktCustomInstancesDevices.cpp
-	vktCustomInstancesDevices.hpp
 	vktContextManager.cpp
 	vktContextManager.hpp
 	)
@@ -186,13 +195,17 @@ set(DEQP_VK_LIBS
 	deqp-vk-reconvergence
 	deqp-vk-mesh-shader
 	deqp-vk-fragment-shading-barycentric
-	deqp-vk-video
 	deqp-vk-shader-object
 	deqp-vk-dgc
 	deqp-vk-cooperative_vector
 	deqp-vk-tensor
 	deqp-vk-data-graph
+	deqp-vk-custom-instances-devices-util
 	)
+
+list(APPEND DEQP_VK_LIBS
+	deqp-vk-video
+)
 
 set(DEQP_VKSC_LIBS
 	tcutil
@@ -242,6 +255,7 @@ set(DEQP_VKSC_LIBS
 	deqp-vksc-fragment-shading-rate
 	deqp-vksc-sc
 	deqp-vksc-cooperative_vector
+	deqp-vksc-custom-instances-devices-util
 	)
 
 
